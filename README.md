@@ -15,6 +15,7 @@
 - [Data Storage](#data-storage)
 - [Design Decisions](#design-decisions)
 - [Roadmap](#roadmap)
+- [Known Issues](#known-issues)
 - [Development Log](#development-log)
 
 ---
@@ -200,12 +201,53 @@ ClipDrop/
 
 ---
 
-## Development Log
+## Known Issues
+
+These bugs were discovered during the first live test of ClipDrop v1.0 and are actively being worked on:
+
+---
+
+### 🐛 Bug 1 — Popup Flickers and Vanishes on Second Trigger
+
+**Status:** 🔧 Fix in progress
+
+**What happens:**
+The dropdown popup appears correctly the first time it is triggered. On the second trigger, a Python window flashes on screen briefly and disappears repeatedly without showing the popup.
+
+**Root cause:**
+`tkinter` (the UI library used for the popup) only allows one main window (`Tk()`) to exist at a time. Every time the popup is triggered, the code tries to create a brand new main window — causing a conflict that results in the flickering behaviour.
+
+**Planned fix:**
+Restructure `dropdown_popup.py` to reuse a single persistent window instead of creating a new one each time it is triggered.
+
+**File affected:** `src/dropdown_popup.py`
+
+---
+
+### 🐛 Bug 2 — "Paste from ClipDrop" Only Appears on the Desktop
+
+**Status:** 🔧 Fix in progress
+
+**What happens:**
+The "Paste from ClipDrop" option appears correctly when right-clicking on the Desktop or inside File Explorer. It does not appear when right-clicking inside applications such as Notepad, browsers, or HTML forms.
+
+**Root cause:**
+Windows has two separate types of right-click menus. The Windows Registry approach (used in v1.0) only covers the Windows Shell — the Desktop and File Explorer. Applications like Notepad, Chrome, and Word build their own right-click menus independently and do not allow external injection via the Registry.
+
+**Planned fix:**
+Implement a low-level system-wide mouse hook that intercepts right-click events at the Windows level — before any application handles them. This will display a custom ClipDrop menu overlay across all applications. The existing `Ctrl+Shift+V` hotkey will also be promoted as a primary trigger that works everywhere without needing a right-click.
+
+**File affected:** `src/context_menu.py`
+
+---
 
 | Date | Milestone |
 |---|---|
 | 2026-05-07 | Project concept defined, design document completed |
 | 2026-05-07 | Project folder and GitHub repository initialized |
+| 2026-05-15 | All 7 source files written — core engine, UI, and Windows integration |
+| 2026-05-15 | First live test — app launches, tray icon works, clipboard monitoring works |
+| 2026-05-15 | First live test — popup shows on first trigger, 2 bugs identified and documented |
 
 ---
 
