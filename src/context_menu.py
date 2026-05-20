@@ -20,7 +20,6 @@ import tempfile
 import time
 import keyboard   # Global hotkey listener
 import pyautogui
-from dropdown_popup import DropdownPopup
 
 
 # ---- Registry key paths ----
@@ -51,9 +50,10 @@ HOTKEY = "ctrl+shift+v"
 
 class ContextMenu:
 
-    def __init__(self, history_manager):
+    def __init__(self, history_manager, popup, root):
         self.history = history_manager
-        self.popup = DropdownPopup(history_manager)
+        self.popup   = popup    # Shared DropdownPopup from main.py
+        self.root    = root     # Shared tkinter root from main.py
         self.running = False
 
 

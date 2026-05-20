@@ -34,6 +34,10 @@ class ClipboardWatcher:
         # Controls whether the watcher is running
         self.running = False
 
+        # Pause flag — set to True while ClipDrop is pasting
+        # so we don't accidentally record our own paste as a new copy
+        self.paused = False
+
 
     def start(self):
         """
@@ -45,7 +49,9 @@ class ClipboardWatcher:
 
         while self.running:
             try:
-                self.check_clipboard()
+                # Skip checking while ClipDrop is pasting
+                if not self.paused:
+                    self.check_clipboard()
             except Exception as e:
                 # If something goes wrong, we log it but keep running
                 print(f"Watcher error: {e}")

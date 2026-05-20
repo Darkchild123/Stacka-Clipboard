@@ -21,9 +21,12 @@ ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
 
 class TrayIcon:
 
-    def __init__(self, history_manager):
+    def __init__(self, history_manager, root):
         # Store the history manager so we can call clear_all() from the tray
         self.history = history_manager
+
+        # The shared tkinter root — used to safely schedule UI actions
+        self.root = root
 
         # settings_panel will be imported here when needed
         # (we import it late to avoid circular imports)
@@ -103,11 +106,11 @@ class TrayIcon:
     def _quit(self, icon, menu_item):
         """
         Cleanly quits ClipDrop when the user clicks 'Quit'.
-        Stops the tray icon which ends the app.
+        Stops the tray icon and destroys the tkinter root.
         """
         print("Quitting ClipDrop...")
         self.tray.stop()
-        sys.exit(0)
+        self.root.after(0, self.root.destroy)
 
 
     def _do_nothing(self, icon, menu_item):
