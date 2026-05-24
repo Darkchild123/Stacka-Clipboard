@@ -41,10 +41,10 @@ COLOURS = {
 FONT_PREVIEW = ("Segoe UI", 10)
 FONT_SOURCE  = ("Segoe UI", 8)
 
-POPUP_WIDTH  = 380
-MAX_HEIGHT   = 480
-ITEM_HEIGHT  = 64
-THUMB_SIZE   = 40
+POPUP_WIDTH  = 400
+MAX_HEIGHT   = 500
+ITEM_HEIGHT  = 72
+THUMB_SIZE   = 36
 PADDING      = 10
 
 
@@ -150,10 +150,28 @@ class DropdownPopup:
         self.window.update_idletasks()
         self._position_popup(x, y)
 
-        # Now show it
+        # Fade in smoothly from transparent to fully visible
+        self.window.attributes("-alpha", 0.0)
         self.window.deiconify()
         self.window.lift()
         self.window.focus_force()
+        self._fade_in()
+
+
+    def _fade_in(self, alpha=0.0):
+        """
+        Smoothly fades the popup in from transparent to fully visible.
+        Steps up opacity by 0.08 every 15ms — reaches full opacity in ~190ms.
+        """
+        if not self.window:
+            return
+        alpha = min(alpha + 0.08, 1.0)
+        try:
+            self.window.attributes("-alpha", alpha)
+        except Exception:
+            return
+        if alpha < 1.0:
+            self.root.after(15, lambda: self._fade_in(alpha))
 
 
     # ============================================================
@@ -262,18 +280,29 @@ class DropdownPopup:
         row.pack(fill="x")
         row.pack_propagate(False)
 
-        row.bind("<Enter>", lambda e, r=row: r.configure(bg=COLOURS["bg_hover"]))
-        row.bind("<Leave>", lambda e, r=row, b=bg: r.configure(bg=b))
+        # Thin separator line between items
+        sep = tk.Frame(parent, bg=COLOURS["border"], height=1)
+        sep.pack(fill="x")
 
-        # Thumbnail
-        thumb_frame = tk.Frame(row, bg=bg, width=THUMB_SIZE + 10)
-        thumb_frame.pack(side="left", fill="y", padx=(8, 4))
+        def _enter(e, r=row, s=sep):
+            r.configure(bg=COLOURS["bg_hover"])
+            s.configure(bg=COLOURS["bg_hover"])
+        def _leave(e, r=row, s=sep, b=bg):
+            r.configure(bg=b)
+            s.configure(bg=COLOURS["border"])
+
+        row.bind("<Enter>", _enter)
+        row.bind("<Leave>", _leave)
+
+        # Thumbnail — smaller column so text gets more room
+        thumb_frame = tk.Frame(row, bg=bg, width=THUMB_SIZE + 6)
+        thumb_frame.pack(side="left", fill="y", padx=(6, 2))
         thumb_frame.pack_propagate(False)
         self._build_thumbnail(thumb_frame, item, bg)
 
-        # Preview and source text
+        # Preview and source text — tight vertical padding so text fills the row
         text_frame = tk.Frame(row, bg=bg)
-        text_frame.pack(side="left", fill="both", expand=True, pady=8)
+        text_frame.pack(side="left", fill="both", expand=True, pady=(4, 4))
 
         preview   = self.history.get_preview(item)
         pin_badge = " 📌" if is_pinned else ""
@@ -281,10 +310,10 @@ class DropdownPopup:
         preview_label = tk.Label(
             text_frame, text=preview + pin_badge,
             bg=bg, fg=COLOURS["text_preview"],
-            font=FONT_PREVIEW, anchor="w",
-            wraplength=190, justify="left"
+            font=FONT_PREVIEW, anchor="nw",
+            wraplength=220, justify="left"
         )
-        preview_label.pack(anchor="w")
+        preview_label.pack(anchor="w", fill="x")
 
         source_label = tk.Label(
             text_frame, text=f"From: {item.get('source', 'Unknown')}",
@@ -305,19 +334,33 @@ class DropdownPopup:
                 widget.bind("<Button-3>",
                     lambda e, i=item: self._show_send_to_menu(e, i))
 
-        # Action buttons
+        # Action buttons — 2×2 grid so each button has comfortable click space
+        #   col 0  col 1
+        #   📌     ↑
+        #   ✕      ↓
         btn_frame = tk.Frame(row, bg=bg)
         btn_frame.pack(side="right", fill="y", padx=(0, 6))
+        # Centre the grid vertically inside the row
+        btn_frame.pack_configure(anchor="center")
 
         pin_symbol = "📌" if is_pinned else "📍"
-        self._make_button(btn_frame, pin_symbol,
-            lambda i=item: self._toggle_pin(i), COLOURS["pin"])
-        self._make_button(btn_frame, "↑",
-            lambda i=item: self._move_up(i), COLOURS["text_dim"])
-        self._make_button(btn_frame, "↓",
-            lambda i=item: self._move_down(i), COLOURS["text_dim"])
-        self._make_button(btn_frame, "✕",
-            lambda i=item: self._delete_item(i), COLOURS["danger"])
+        grid_btns = [
+            (pin_symbol, lambda i=item: self._toggle_pin(i),  COLOURS["pin"],      0, 0),
+            ("↑",        lambda i=item: self._move_up(i),     COLOURS["text_dim"], 0, 1),
+            ("✕",        lambda i=item: self._delete_item(i), COLOURS["danger"],   1, 0),
+            ("↓",        lambda i=item: self._move_down(i),   COLOURS["text_dim"], 1, 1),
+        ]
+        for text, cmd, colour, r, c in grid_btns:
+            btn = tk.Label(
+                btn_frame, text=text,
+                bg=COLOURS["bg_item"], fg=colour,
+                font=("Segoe UI", 10),
+                padx=5, pady=4, cursor="hand2"
+            )
+            btn.grid(row=r, column=c, padx=2, pady=2)
+            btn.bind("<Button-1>", lambda e, c=cmd: (c(), "break")[1])
+            btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=COLOURS["bg_hover"]))
+            btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=COLOURS["bg_item"]))
 
 
     def _show_profile_menu(self, anchor_widget):
@@ -449,7 +492,7 @@ class DropdownPopup:
 
         icon = "📄" if item["type"] == "text" else "📁"
         tk.Label(parent, text=icon, bg=bg,
-                 font=("Segoe UI Emoji", 20)).pack(expand=True)
+                 font=("Segoe UI Emoji", 16)).pack(expand=True)
 
 
     def _make_button(self, parent, text, command, colour):

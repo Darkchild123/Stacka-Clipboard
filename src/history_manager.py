@@ -104,8 +104,14 @@ class HistoryManager:
         - Image: "📷 Image"
         """
         if item["type"] == "text":
-            text = item["content"]
-            return text[:60] + "..." if len(text) > 60 else text
+            # Strip leading/trailing whitespace so the preview always starts
+            # with real characters, not blank lines from how text was selected.
+            # Also collapse internal newlines/tabs into a single space so
+            # multi-line copies display as one readable line in the dropdown.
+            import re
+            text = item["content"].strip()
+            text = re.sub(r"\s+", " ", text)
+            return text[:120] + "..." if len(text) > 120 else text
 
         elif item["type"] == "file":
             files = item["content"]

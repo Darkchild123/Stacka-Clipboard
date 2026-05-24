@@ -232,31 +232,31 @@ class SettingsPanel:
         self._refresh_profile_list()
 
         # Action buttons row
-        btn_row = tk.Frame(section, bg=COLOURS["bg"])
-        btn_row.pack(fill="x", pady=(8, 0))
-
-        actions = [
-            ("＋ New",    self._new_profile,           COLOURS["bg_section"], COLOURS["accent"]),
-            ("✎ Rename",  self._rename_profile,        COLOURS["bg_section"], COLOURS["accent"]),
-            ("✕ Delete",  self._delete_profile,        COLOURS["bg_section"], COLOURS["accent"]),
-            ("↑",         self._move_profile_up,       COLOURS["bg_section"], COLOURS["accent"]),
-            ("↓",         self._move_profile_down,     COLOURS["bg_section"], COLOURS["accent"]),
-            ("🧹 Clear",  self._clear_selected_profile, COLOURS["danger"],    COLOURS["danger_hover"]),
-        ]
-
-        for label, cmd, bg_col, hover_col in actions:
+        def _make_profile_btn(parent, label, cmd, bg_col, hover_col):
             btn = tk.Label(
-                btn_row, text=label,
+                parent, text=label,
                 bg=bg_col, fg="white",
-                font=("Segoe UI", 9), padx=8, pady=4,
+                font=("Segoe UI", 9), padx=10, pady=5,
                 cursor="hand2", relief="flat"
             )
-            btn.pack(side="left", padx=(0, 4))
+            btn.pack(side="left", padx=(0, 6))
             btn.bind("<Button-1>", lambda e, c=cmd: c())
-            btn.bind("<Enter>",
-                lambda e, b=btn, h=hover_col: b.configure(bg=h))
-            btn.bind("<Leave>",
-                lambda e, b=btn, bg=bg_col: b.configure(bg=bg))
+            btn.bind("<Enter>",  lambda e, b=btn, h=hover_col: b.configure(bg=h))
+            btn.bind("<Leave>",  lambda e, b=btn, bg=bg_col:   b.configure(bg=bg))
+
+        # Row 1 — create / rename / delete
+        row1 = tk.Frame(section, bg=COLOURS["bg"])
+        row1.pack(fill="x", pady=(8, 4))
+        _make_profile_btn(row1, "＋ New",    self._new_profile,            COLOURS["bg_section"], COLOURS["accent"])
+        _make_profile_btn(row1, "✎ Rename",  self._rename_profile,         COLOURS["bg_section"], COLOURS["accent"])
+        _make_profile_btn(row1, "✕ Delete",  self._delete_profile,         COLOURS["bg_section"], COLOURS["accent"])
+
+        # Row 2 — reorder / clear
+        row2 = tk.Frame(section, bg=COLOURS["bg"])
+        row2.pack(fill="x", pady=(0, 0))
+        _make_profile_btn(row2, "↑  Move Up",   self._move_profile_up,        COLOURS["bg_section"], COLOURS["accent"])
+        _make_profile_btn(row2, "↓  Move Down", self._move_profile_down,      COLOURS["bg_section"], COLOURS["accent"])
+        _make_profile_btn(row2, "🧹 Clear",     self._clear_selected_profile, COLOURS["danger"],     COLOURS["danger_hover"])
 
 
     def _refresh_profile_list(self):
