@@ -27,6 +27,9 @@ import pyautogui
 import winreg
 import os
 import sys
+import win32gui
+import win32process
+import psutil
 
 
 # ---- Windows API constants ----
@@ -43,6 +46,25 @@ REG_PATHS = [
     r"Directory\shell\ClipDrop",
     r"Directory\Background\shell\ClipDrop",
 ]
+
+# ---- Apps where the overlay should NOT appear ----
+# Windows Explorer (file browser) is excluded because the overlay
+# is intrusive when copying/moving files. The hotkey still works there.
+EXCLUDED_PROCESSES = {
+    "explorer.exe",   # Windows Explorer file browser
+}
+
+# ---- Window classes that identify a file browser window ----
+# explorer.exe also powers the Desktop — we only exclude the file browser
+EXCLUDED_WINDOW_CLASSES = {
+    "CabinetWClass",    # File Explorer window
+    "ExplorerWClass",   # Older Explorer window
+    "WorkerW",          # Desktop background
+}
+
+# ---- Apps where the overlay SHOULD appear ----
+# Any app not in the excluded list will show the overlay.
+# This covers all text editors, browsers, HTML forms, and apps.
 
 # ---- Overlay appearance ----
 OVERLAY_COLOURS = {
@@ -143,21 +165,177 @@ class ContextMenu:
 
         # Click to open ClipDrop popup
         self.overlay_btn.bind("<Button-1>", self._on_overlay_clicked)
+        # The overlay auto-hides after 3 seconds via the timer in _do_show_overlay().
+        # No FocusOut binding — the overlay intentionally never takes focus,
+        # so focus-based hiding would never fire and could cause odd behaviour.
 
-        # Hide if user clicks anywhere else
-        self.overlay.bind("<FocusOut>", lambda e: self._hide_overlay())
+
+    def _should_show_overlay(self):
+        """
+        Checks whether the overlay button should appear.
+        Returns False for Windows Explorer file browser windows
+        where the button would be intrusive during file operations.
+        Returns True for all other apps — text editors, browsers,
+        HTML forms, Office apps, terminals, etc.
+        """
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            window_class = win32gui.GetClassName(hwnd)
+
+            # Check window class — excludes file browser windows
+            if window_class in EXCLUDED_WINDOW_CLASSES:
+                return False
+
+            # Check process name
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            process = psutil.Process(pid)
+            process_name = process.name().lower()
+
+            if process_name in EXCLUDED_PROCESSES:
+                # explorer.exe can be the taskbar or Desktop too —
+                # only exclude it if the window class is a file browser
+                if window_class in EXCLUDED_WINDOW_CLASSES:
+                    return False
+
+        except Exception:
+            pass  # If detection fails, default to showing the overlay
+
+        return True
 
 
     def _show_overlay(self, x, y):
         """
         Shows the floating button near the right-click position.
-        Schedules via root.after() to run on the main thread.
+        First checks whether the current app should show the overlay.
+
+        The native context menu search runs entirely on a background thread
+        so we can retry without freezing tkinter.  Only the final UI update
+        is scheduled back onto the main thread.
         """
-        self.root.after(0, lambda: self._do_show_overlay(x, y))
+        if not self._should_show_overlay():
+            return
+
+        def find_and_show():
+            """
+            Searches for the native context menu rect with retry logic.
+            Different apps render their menus at different speeds — some
+            take longer than 120 ms.  We poll up to ~300 ms total.
+            """
+            menu_rect = None
+            for wait in (0.10, 0.05, 0.05, 0.05, 0.05):
+                time.sleep(wait)
+                menu_rect = self._find_context_menu_rect()
+                if menu_rect:
+                    break
+
+            # Hand off to the main thread for the UI update
+            self.root.after(0, lambda: self._do_show_overlay(x, y, menu_rect))
+
+        threading.Thread(target=find_and_show, daemon=True).start()
 
 
-    def _do_show_overlay(self, x, y):
-        """Actually shows the overlay — runs on main thread."""
+    def _find_context_menu_rect(self):
+        """
+        Searches for the native Windows context menu window.
+        Context menus always use the window class '#32768'.
+        Returns (left, top, right, bottom) or None if not found.
+        """
+        found = []
+
+        def enum_callback(hwnd, _):
+            try:
+                if win32gui.IsWindowVisible(hwnd):
+                    class_name = win32gui.GetClassName(hwnd)
+                    if class_name == "#32768":
+                        rect = win32gui.GetWindowRect(hwnd)
+                        # Only count it if it has a real size
+                        if rect[2] - rect[0] > 10 and rect[3] - rect[1] > 10:
+                            found.append(rect)
+            except Exception:
+                pass
+
+        try:
+            win32gui.EnumWindows(enum_callback, None)
+        except Exception:
+            pass
+
+        return found[0] if found else None
+
+
+    def _best_position(self, menu_rect, btn_w, btn_h, screen_w, screen_h):
+        """
+        Places the overlay button strictly outside the context menu borders.
+
+        For each of the four directions, this calculates the exact position,
+        clamps it to the screen, and then checks whether the clamped result
+        actually overlaps the menu.  Directions are tried in order of
+        available space; the first one that is genuinely clear wins.
+
+        This handles the common failure case: "below" looks like the best
+        direction by score, but screen-edge clamping pulls the button back
+        up into the menu.  We detect that and fall through to the next
+        direction automatically.
+        """
+        ml, mt, mr, mb = menu_rect
+        PAD  = 10    # Minimum gap between button edge and menu edge
+        EDGE = 5     # Minimum distance from screen edge
+
+        def clamp_pos(x, y):
+            """Keeps the button fully on screen."""
+            x = max(EDGE, min(x, screen_w - btn_w - EDGE))
+            y = max(EDGE, min(y, screen_h - btn_h - EDGE))
+            return x, y
+
+        def overlaps_menu(x, y):
+            """True if the button at (x, y) overlaps the menu rectangle."""
+            btn_r = x + btn_w
+            btn_b = y + btn_h
+            return (x < mr and btn_r > ml and y < mb and btn_b > mt)
+
+        # Available pixels in each direction (screen space minus button minus gap)
+        space_above = mt            - EDGE - PAD
+        space_below = screen_h - mb - EDGE - PAD
+        space_left  = ml            - EDGE - PAD
+        space_right = screen_w - mr - EDGE - PAD
+
+        # Each candidate: (score, raw_x, raw_y)
+        # raw position is before clamping; score = leftover space after button fits
+        candidates = [
+            (space_above - btn_h,  ml,              mt - btn_h - PAD),  # above
+            (space_below - btn_h,  ml,              mb + PAD),          # below
+            (space_left  - btn_w,  ml - btn_w - PAD, mt),              # left
+            (space_right - btn_w,  mr + PAD,         mt),              # right
+        ]
+
+        # Try directions from most space to least
+        candidates.sort(key=lambda c: c[0], reverse=True)
+
+        for score, raw_x, raw_y in candidates:
+            x, y = clamp_pos(raw_x, raw_y)
+            if not overlaps_menu(x, y):
+                return x, y  # First clear position wins
+
+        # Every direction overlaps (extremely tight screen / huge menu).
+        # Use the highest-scored direction and accept it as the best we can do.
+        _, raw_x, raw_y = candidates[0]
+        return clamp_pos(raw_x, raw_y)
+
+
+    def _do_show_overlay(self, x, y, menu_rect=None):
+        """
+        Positions and shows the overlay button.
+
+        menu_rect is supplied by the background thread in _show_overlay —
+        it has already retried up to ~300 ms to find the native context menu.
+
+        If menu_rect was found: use smart border-based positioning.
+        If not found: place the button in a corner well away from the cursor
+        so we don't accidentally land on top of the invisible menu.
+
+        NOTE: Do NOT call focus_force() here.
+        focus_force() steals focus from the native context menu, causing
+        Windows to close it immediately. The button works without focus.
+        """
         if not self.overlay:
             return
 
@@ -166,21 +344,54 @@ class ContextMenu:
             self.root.after_cancel(self.overlay_timer)
             self.overlay_timer = None
 
-        # Position the button just above and to the right of the cursor
-        offset_x = 10
-        offset_y = -50
-
-        screen_w = self.overlay.winfo_screenwidth()
-        screen_h = self.overlay.winfo_screenheight()
-
-        # Measure button size
+        # Measure our button's dimensions
         self.overlay.update_idletasks()
         btn_w = self.overlay.winfo_reqwidth()
         btn_h = self.overlay.winfo_reqheight()
 
-        # Keep it on screen
-        pos_x = min(x + offset_x, screen_w - btn_w - 10)
-        pos_y = max(y + offset_y, 10)
+        screen_w = self.overlay.winfo_screenwidth()
+        screen_h = self.overlay.winfo_screenheight()
+
+        if menu_rect:
+            # Smart positioning — place in the largest clear space around the menu
+            pos_x, pos_y = self._best_position(
+                menu_rect, btn_w, btn_h, screen_w, screen_h
+            )
+        else:
+            # Fallback — menu window not detected.
+            # Some apps (browsers, HTML forms, custom UI frameworks) render
+            # their context menus without using Windows' standard #32768 class,
+            # so we can't find the rect directly.
+            #
+            # Windows' context menu placement follows a predictable rule:
+            # the menu always opens AWAY from the nearest screen edge.
+            #
+            #   cursor in left  half  → menu opens to the RIGHT of cursor
+            #   cursor in right half  → menu opens to the LEFT  of cursor
+            #   cursor in top   half  → menu opens DOWNWARD from cursor
+            #   cursor in bottom half → menu opens UPWARD   from cursor
+            #
+            # Counter-logic: place our button on the OPPOSITE side of the
+            # cursor from where the menu opened — that space is guaranteed
+            # to be clear of the menu.
+            PAD  = 10
+            EDGE = 5
+
+            # Horizontal: opposite side from where menu opened
+            if x < screen_w // 2:
+                # Menu is to the RIGHT → button goes LEFT of cursor
+                pos_x = max(EDGE, x - btn_w - PAD)
+            else:
+                # Menu is to the LEFT → button goes RIGHT of cursor
+                pos_x = min(x + PAD, screen_w - btn_w - EDGE)
+
+            # Vertical: opposite side from where menu opened
+            if y < screen_h // 2:
+                # Menu opens DOWNWARD → button goes ABOVE cursor
+                pos_y = max(EDGE, y - btn_h - PAD)
+            else:
+                # Menu opens UPWARD → button goes BELOW cursor
+                pos_y = min(y + PAD, screen_h - btn_h - EDGE)
 
         self.overlay.geometry(f"+{pos_x}+{pos_y}")
         self.overlay.deiconify()
@@ -399,7 +610,14 @@ class ContextMenu:
 
     def _register_in_registry(self):
         """Adds ClipDrop to the Desktop and File Explorer right-click menu."""
-        command = f'"{sys.executable}" -c "import tempfile, pyautogui; open(tempfile.gettempdir()+chr(92)+\'clipdrop.signal\',\'w\').write(str(pyautogui.position()))"'
+
+        # Use pythonw.exe instead of python.exe
+        # pythonw.exe runs Python silently — no console window appears
+        pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = sys.executable  # Fallback if pythonw not found
+
+        command = f'"{pythonw}" -c "import tempfile, pyautogui; open(tempfile.gettempdir()+chr(92)+\'clipdrop.signal\',\'w\').write(str(pyautogui.position()))"'
 
         for reg_path in REG_PATHS:
             try:
