@@ -43,9 +43,10 @@ FONT_LINK    = ("Segoe UI", 9, "underline")
 
 class SettingsPanel:
 
-    def __init__(self, history_manager):
-        self.history = history_manager
-        self.root = None
+    def __init__(self, history_manager, profile_manager=None):
+        self.history  = history_manager
+        self.profiles = profile_manager
+        self.root     = None
 
 
     def show(self):
@@ -61,13 +62,15 @@ class SettingsPanel:
 
         # Set the window size and centre it on screen
         window_width  = 420
-        window_height = 520
+        window_height = 680
         self._centre_window(window_width, window_height)
 
         # Build all sections of the settings panel
         self._build_header()
         self._build_divider()
         self._build_history_section()
+        self._build_divider()
+        self._build_profiles_section()
         self._build_divider()
         self._build_danger_section()
         self._build_divider()
@@ -188,6 +191,168 @@ class SettingsPanel:
             font=FONT_SMALL
         )
         self.save_feedback.pack(anchor="w", pady=(4, 0))
+
+
+    def _build_profiles_section(self):
+        """
+        Profile management section.
+        Lets the user create, rename, delete, and reorder profiles.
+        """
+        if not self.profiles:
+            return
+
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section.pack(fill="x")
+
+        tk.Label(section, text="👤  Profiles",
+                 bg=COLOURS["bg"], fg=COLOURS["text"],
+                 font=FONT_HEADING, anchor="w").pack(fill="x")
+
+        tk.Label(section,
+                 text="Organise your clipboard into named workflow collections.",
+                 bg=COLOURS["bg"], fg=COLOURS["text_dim"],
+                 font=FONT_SMALL, anchor="w").pack(fill="x", pady=(2, 10))
+
+        # Profile list — a scrollable listbox
+        list_frame = tk.Frame(section, bg=COLOURS["border"], padx=1, pady=1)
+        list_frame.pack(fill="x")
+
+        self.profile_listbox = tk.Listbox(
+            list_frame,
+            bg=COLOURS["bg_input"], fg=COLOURS["text"],
+            selectbackground=COLOURS["accent"],
+            selectforeground="white",
+            font=FONT_BODY,
+            height=5,
+            relief="flat",
+            bd=0,
+            activestyle="none"
+        )
+        self.profile_listbox.pack(fill="x")
+        self._refresh_profile_list()
+
+        # Action buttons row
+        btn_row = tk.Frame(section, bg=COLOURS["bg"])
+        btn_row.pack(fill="x", pady=(8, 0))
+
+        actions = [
+            ("＋ New",    self._new_profile),
+            ("✎ Rename",  self._rename_profile),
+            ("✕ Delete",  self._delete_profile),
+            ("↑",         self._move_profile_up),
+            ("↓",         self._move_profile_down),
+        ]
+
+        for label, cmd in actions:
+            btn = tk.Label(
+                btn_row, text=label,
+                bg=COLOURS["bg_section"], fg=COLOURS["text"],
+                font=("Segoe UI", 9), padx=8, pady=4,
+                cursor="hand2", relief="flat"
+            )
+            btn.pack(side="left", padx=(0, 4))
+            btn.bind("<Button-1>", lambda e, c=cmd: c())
+            btn.bind("<Enter>",
+                lambda e, b=btn: b.configure(bg=COLOURS["accent"]))
+            btn.bind("<Leave>",
+                lambda e, b=btn, bg=COLOURS["bg_section"]: b.configure(bg=bg))
+
+
+    def _refresh_profile_list(self):
+        """Rebuilds the profile listbox from current profile data."""
+        if not hasattr(self, "profile_listbox"):
+            return
+        self.profile_listbox.delete(0, "end")
+        for profile in self.profiles.get_all_profiles():
+            count  = self.profiles.get_profile_item_count(profile["id"])
+            active = "● " if profile["id"] == self.profiles.active_id else "  "
+            lock   = " 🔒" if profile.get("built_in") else ""
+            self.profile_listbox.insert(
+                "end",
+                f"{active}{profile['name']}{lock}  ({count} items)"
+            )
+
+
+    def _selected_profile(self):
+        """Returns the profile dict for the currently selected listbox row."""
+        sel = self.profile_listbox.curselection()
+        if not sel:
+            return None
+        idx = sel[0]
+        return self.profiles.get_all_profiles()[idx]
+
+
+    def _new_profile(self):
+        """Opens a dialog to create a new profile."""
+        from tkinter import simpledialog
+        name = simpledialog.askstring(
+            "New Profile", "Enter a name for the new profile:",
+            parent=self.root
+        )
+        if name and name.strip():
+            self.profiles.create_profile(name.strip())
+            self._refresh_profile_list()
+
+
+    def _rename_profile(self):
+        """Renames the selected profile."""
+        profile = self._selected_profile()
+        if not profile:
+            messagebox.showinfo("Rename Profile",
+                                "Select a profile first.", parent=self.root)
+            return
+        if profile.get("built_in"):
+            messagebox.showinfo("Rename Profile",
+                                "The General profile cannot be renamed.",
+                                parent=self.root)
+            return
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring(
+            "Rename Profile",
+            f"New name for '{profile['name']}':",
+            initialvalue=profile["name"],
+            parent=self.root
+        )
+        if new_name and new_name.strip():
+            self.profiles.rename_profile(profile["id"], new_name.strip())
+            self._refresh_profile_list()
+
+
+    def _delete_profile(self):
+        """Deletes the selected profile after confirmation."""
+        profile = self._selected_profile()
+        if not profile:
+            messagebox.showinfo("Delete Profile",
+                                "Select a profile first.", parent=self.root)
+            return
+        if profile.get("built_in"):
+            messagebox.showinfo("Delete Profile",
+                                "The General profile cannot be deleted.",
+                                parent=self.root)
+            return
+        confirmed = messagebox.askyesno(
+            "Delete Profile",
+            f"Delete profile '{profile['name']}'?\n\n"
+            "Items in this profile will not be deleted — they remain in General.",
+            parent=self.root
+        )
+        if confirmed:
+            self.profiles.delete_profile(profile["id"])
+            self._refresh_profile_list()
+
+
+    def _move_profile_up(self):
+        profile = self._selected_profile()
+        if profile:
+            self.profiles.move_up(profile["id"])
+            self._refresh_profile_list()
+
+
+    def _move_profile_down(self):
+        profile = self._selected_profile()
+        if profile:
+            self.profiles.move_down(profile["id"])
+            self._refresh_profile_list()
 
 
     def _build_danger_section(self):

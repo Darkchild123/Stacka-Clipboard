@@ -50,17 +50,19 @@ PADDING      = 10
 
 class DropdownPopup:
 
-    def __init__(self, root, history_manager, watcher=None):
+    def __init__(self, root, history_manager, watcher=None, profile_manager=None):
         """
         root            — the shared tkinter root from main.py
         history_manager — the app's history manager
         watcher         — the clipboard watcher (so we can pause it during paste)
+        profile_manager — manages profiles and active profile selection
         """
-        self.root    = root
-        self.history = history_manager
-        self.watcher = watcher    # Used to pause watching during paste
-        self.window  = None       # The popup Toplevel window
-        self.thumbnails = []      # Keep image references alive
+        self.root     = root
+        self.history  = history_manager
+        self.watcher  = watcher           # Used to pause watching during paste
+        self.profiles = profile_manager   # Profile filtering and switching
+        self.window   = None              # The popup Toplevel window
+        self.thumbnails = []              # Keep image references alive
 
         # Drag state — used to track window repositioning (header drag)
         self._drag_x = 0
@@ -119,7 +121,12 @@ class DropdownPopup:
         self._do_hide()
 
         self.thumbnails = []
-        items = self.history.get_all()
+        # Use active profile's filtered items if profiles are available,
+        # otherwise fall back to full history
+        if self.profiles:
+            items = self.profiles.get_active_items()
+        else:
+            items = self.history.get_all()
 
         # Create a Toplevel window — child of root, not a new Tk()
         self.window = tk.Toplevel(self.root)
@@ -163,7 +170,7 @@ class DropdownPopup:
         inner = tk.Frame(border, bg=COLOURS["bg"])
         inner.pack(fill="both", expand=True)
 
-        # Header — also acts as the drag handle for repositioning the popup
+        # Header — drag handle + profile switcher
         header = tk.Frame(inner, bg=COLOURS["accent"], height=32)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -182,7 +189,25 @@ class DropdownPopup:
         )
         lbl_count.pack(side="right", fill="y")
 
-        # Make the entire header row draggable
+        # Profile switcher — shows active profile name with a dropdown arrow.
+        # Clicking it opens a menu to switch profiles.
+        if self.profiles:
+            active_name = self.profiles.get_active_profile()["name"]
+            lbl_profile = tk.Label(
+                header, text=f"{active_name}  ▾",
+                bg=COLOURS["accent"], fg="#c7d2fe",
+                font=("Segoe UI", 8, "bold"),
+                padx=6, cursor="hand2"
+            )
+            lbl_profile.pack(side="right", fill="y")
+            lbl_profile.bind("<Button-1>",
+                lambda e, lbl=lbl_profile: self._show_profile_menu(lbl))
+            lbl_profile.bind("<Enter>",
+                lambda e: lbl_profile.configure(fg="white"))
+            lbl_profile.bind("<Leave>",
+                lambda e: lbl_profile.configure(fg="#c7d2fe"))
+
+        # Make title and count draggable (not the profile switcher)
         for widget in (header, lbl_title, lbl_count):
             self._make_draggable(widget)
 
@@ -268,13 +293,17 @@ class DropdownPopup:
         )
         source_label.pack(anchor="w")
 
-        # Click to paste — drag to drop elsewhere
-        # ButtonPress starts tracking, B1-Motion activates drag mode if threshold
-        # exceeded, ButtonRelease decides whether it was a click or a drop.
+        # Left-click: paste or drag-to-drop
         for widget in [row, text_frame, preview_label, source_label]:
             widget.bind("<ButtonPress-1>",   lambda e, i=item: self._on_item_press(e, i))
             widget.bind("<B1-Motion>",       lambda e, i=item: self._on_item_drag(e, i))
             widget.bind("<ButtonRelease-1>", lambda e, i=item: self._on_item_release(e, i))
+
+        # Right-click: "Send to profile" context menu
+        if self.profiles:
+            for widget in [row, text_frame, preview_label, source_label]:
+                widget.bind("<Button-3>",
+                    lambda e, i=item: self._show_send_to_menu(e, i))
 
         # Action buttons
         btn_frame = tk.Frame(row, bg=bg)
@@ -289,6 +318,95 @@ class DropdownPopup:
             lambda i=item: self._move_down(i), COLOURS["text_dim"])
         self._make_button(btn_frame, "✕",
             lambda i=item: self._delete_item(i), COLOURS["danger"])
+
+
+    def _show_profile_menu(self, anchor_widget):
+        """
+        Shows a dropdown menu of all profiles below the profile switcher label.
+        Clicking a profile switches to it and refreshes the popup.
+        """
+        menu = tk.Menu(self.window, tearoff=0,
+                       bg=COLOURS["bg_item"], fg=COLOURS["text"],
+                       activebackground=COLOURS["accent"],
+                       activeforeground="white",
+                       relief="flat", bd=0)
+
+        for profile in self.profiles.get_all_profiles():
+            pid   = profile["id"]
+            name  = profile["name"]
+            count = self.profiles.get_profile_item_count(pid)
+            label = f"{'✔  ' if pid == self.profiles.active_id else '    '}{name}  ({count})"
+            menu.add_command(
+                label=label,
+                command=lambda p=pid: self._switch_profile(p)
+            )
+
+        # Position the menu directly below the label
+        x = anchor_widget.winfo_rootx()
+        y = anchor_widget.winfo_rooty() + anchor_widget.winfo_height()
+        menu.tk_popup(x, y)
+
+
+    def _switch_profile(self, profile_id):
+        """Switches the active profile and rebuilds the popup."""
+        self.profiles.set_active(profile_id)
+        if self.window:
+            x = self.window.winfo_x()
+            y = self.window.winfo_y()
+            self._build_and_show(x, y)
+
+
+    def _show_send_to_menu(self, event, item):
+        """
+        Shows a right-click context menu on an item with a
+        'Send to profile' submenu listing all user profiles.
+        Items already in a profile are shown with a checkmark.
+        Clicking a profile adds (or removes) the item from it.
+        """
+        user_profiles = [p for p in self.profiles.get_all_profiles()
+                         if not p.get("built_in")]
+
+        if not user_profiles:
+            # No user profiles yet — show a hint instead
+            menu = tk.Menu(self.window, tearoff=0,
+                           bg=COLOURS["bg_item"], fg=COLOURS["text_dim"],
+                           relief="flat", bd=0)
+            menu.add_command(label="No profiles yet — create one in Settings",
+                             state="disabled")
+            menu.tk_popup(event.x_root, event.y_root)
+            return
+
+        menu = tk.Menu(self.window, tearoff=0,
+                       bg=COLOURS["bg_item"], fg=COLOURS["text"],
+                       activebackground=COLOURS["accent"],
+                       activeforeground="white",
+                       relief="flat", bd=0)
+
+        menu.add_command(label="Send to profile:", state="disabled",
+                         font=("Segoe UI", 8))
+        menu.add_separator()
+
+        item_profiles = set(self.profiles.get_item_profiles(item["id"]))
+
+        for profile in user_profiles:
+            pid   = profile["id"]
+            check = "✔  " if pid in item_profiles else "    "
+            menu.add_command(
+                label=f"{check}{profile['name']}",
+                command=lambda p=pid: self._toggle_item_in_profile(item, p)
+            )
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+
+    def _toggle_item_in_profile(self, item, profile_id):
+        """Adds item to profile if not there, removes it if already there."""
+        item_profiles = set(self.profiles.get_item_profiles(item["id"]))
+        if profile_id in item_profiles:
+            self.profiles.remove_item_from_profile(item["id"], profile_id)
+        else:
+            self.profiles.add_item_to_profile(item["id"], profile_id)
+        self._refresh()
 
 
     def _make_draggable(self, widget):
@@ -541,6 +659,9 @@ class DropdownPopup:
         self._refresh()
 
     def _delete_item(self, item):
+        # Remove from all profiles before deleting from history
+        if self.profiles:
+            self.profiles.remove_item_from_all(item["id"])
         self.history.delete_item(item["id"])
         self._refresh()
 

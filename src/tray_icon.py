@@ -21,9 +21,10 @@ ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
 
 class TrayIcon:
 
-    def __init__(self, history_manager, root):
+    def __init__(self, history_manager, profile_manager, root):
         # Store the history manager so we can call clear_all() from the tray
-        self.history = history_manager
+        self.history  = history_manager
+        self.profiles = profile_manager
 
         # The shared tkinter root — used to safely schedule UI actions
         self.root = root
@@ -35,9 +36,13 @@ class TrayIcon:
         # Load or generate the tray icon image
         self.icon_image = self._load_icon()
 
-        # Build the right-click menu for the tray icon
+        # Build the right-click menu for the tray icon.
+        # The Switch Profile submenu is generated dynamically so it always
+        # reflects the current list of profiles.
         self.menu = pystray.Menu(
-            item("ClipDrop", self._do_nothing, enabled=False),  # App name header (not clickable)
+            item("ClipDrop", self._do_nothing, enabled=False),
+            pystray.Menu.SEPARATOR,
+            item(self._active_profile_label, self._do_nothing, enabled=False),
             pystray.Menu.SEPARATOR,
             item("⚙  Settings", self._open_settings),
             item("🧹 Clear History", self._clear_history),
@@ -73,6 +78,19 @@ class TrayIcon:
     # MENU ACTIONS
     # ============================================================
 
+    def _active_profile_label(self, item):
+        """
+        Returns the active profile name for display in the tray menu.
+        Called dynamically by pystray each time the menu opens,
+        so it always shows the current profile.
+        """
+        try:
+            name = self.profiles.get_active_profile()["name"]
+            return f"Profile: {name}"
+        except Exception:
+            return "Profile: General"
+
+
     def _open_settings(self, icon, menu_item):
         """
         Opens the Settings panel when the user clicks 'Settings'
@@ -80,9 +98,8 @@ class TrayIcon:
         doesn't freeze the tray icon.
         """
         def open():
-            # Import here to avoid issues at startup
             from settings_panel import SettingsPanel
-            panel = SettingsPanel(self.history)
+            panel = SettingsPanel(self.history, self.profiles)
             panel.show()
 
         threading.Thread(target=open, daemon=True).start()

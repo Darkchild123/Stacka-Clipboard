@@ -14,6 +14,7 @@ import sys
 import tkinter as tk
 from clipboard_watcher import ClipboardWatcher
 from history_manager import HistoryManager
+from profile_manager import ProfileManager
 from tray_icon import TrayIcon
 from context_menu import ContextMenu
 from dropdown_popup import DropdownPopup
@@ -58,19 +59,22 @@ def main():
     # Step 2: History Manager — loads saved clipboard data from disk
     history = HistoryManager()
 
-    # Step 3: Clipboard Watcher — monitors copy events in background
+    # Step 3: Profile Manager — loads saved profiles from disk
+    profiles = ProfileManager(history)
+
+    # Step 4: Clipboard Watcher — monitors copy events in background
     watcher = ClipboardWatcher(history)
     protected_thread("ClipboardWatcher", watcher.start)
 
-    # Step 4: Dropdown Popup — the visual clipboard list
-    popup = DropdownPopup(root, history, watcher)
+    # Step 5: Dropdown Popup — the visual clipboard list
+    popup = DropdownPopup(root, history, watcher, profiles)
 
-    # Step 5: Context Menu — right-click integration and hotkey
+    # Step 6: Context Menu — right-click integration and hotkey
     context = ContextMenu(history, popup, root)
     protected_thread("ContextMenu", context.setup)
 
-    # Step 6: Tray Icon — system tray icon and menu
-    tray = TrayIcon(history, root)
+    # Step 7: Tray Icon — system tray icon and menu
+    tray = TrayIcon(history, profiles, root)
     protected_thread("TrayIcon", tray.start)
 
     print("ClipDrop is running.")
