@@ -236,26 +236,27 @@ class SettingsPanel:
         btn_row.pack(fill="x", pady=(8, 0))
 
         actions = [
-            ("＋ New",    self._new_profile),
-            ("✎ Rename",  self._rename_profile),
-            ("✕ Delete",  self._delete_profile),
-            ("↑",         self._move_profile_up),
-            ("↓",         self._move_profile_down),
+            ("＋ New",    self._new_profile,           COLOURS["bg_section"], COLOURS["accent"]),
+            ("✎ Rename",  self._rename_profile,        COLOURS["bg_section"], COLOURS["accent"]),
+            ("✕ Delete",  self._delete_profile,        COLOURS["bg_section"], COLOURS["accent"]),
+            ("↑",         self._move_profile_up,       COLOURS["bg_section"], COLOURS["accent"]),
+            ("↓",         self._move_profile_down,     COLOURS["bg_section"], COLOURS["accent"]),
+            ("🧹 Clear",  self._clear_selected_profile, COLOURS["danger"],    COLOURS["danger_hover"]),
         ]
 
-        for label, cmd in actions:
+        for label, cmd, bg_col, hover_col in actions:
             btn = tk.Label(
                 btn_row, text=label,
-                bg=COLOURS["bg_section"], fg=COLOURS["text"],
+                bg=bg_col, fg="white",
                 font=("Segoe UI", 9), padx=8, pady=4,
                 cursor="hand2", relief="flat"
             )
             btn.pack(side="left", padx=(0, 4))
             btn.bind("<Button-1>", lambda e, c=cmd: c())
             btn.bind("<Enter>",
-                lambda e, b=btn: b.configure(bg=COLOURS["accent"]))
+                lambda e, b=btn, h=hover_col: b.configure(bg=h))
             btn.bind("<Leave>",
-                lambda e, b=btn, bg=COLOURS["bg_section"]: b.configure(bg=bg))
+                lambda e, b=btn, bg=bg_col: b.configure(bg=bg))
 
 
     def _refresh_profile_list(self):
@@ -339,6 +340,54 @@ class SettingsPanel:
         if confirmed:
             self.profiles.delete_profile(profile["id"])
             self._refresh_profile_list()
+
+
+    def _clear_selected_profile(self):
+        """
+        Clears the profile selected in the listbox.
+
+        General selected  → asks for confirmation, then deletes all history items.
+        Named profile     → asks for confirmation, then removes all items from
+                            that profile only. Items stay in General and other profiles.
+        """
+        profile = self._selected_profile()
+        if not profile:
+            messagebox.showinfo("Clear Profile",
+                                "Select a profile from the list first.",
+                                parent=self.root)
+            return
+
+        if profile["id"] == "general":
+            confirmed = messagebox.askyesno(
+                title="Clear All History",
+                message="Clear the entire clipboard history?\n\nThis will delete all items from General and cannot be undone.",
+                icon="warning",
+                parent=self.root
+            )
+            if confirmed:
+                self.history.clear_all()
+                self._refresh_profile_list()
+                messagebox.showinfo("Done", "All clipboard history has been cleared.",
+                                    parent=self.root)
+        else:
+            profile_name = profile["name"]
+            confirmed = messagebox.askyesno(
+                title="Clear Profile",
+                message=(
+                    f"Clear all items from \"{profile_name}\"?\n\n"
+                    "Items will not be deleted — they will still appear in General "
+                    "and any other profiles they belong to.\n\n"
+                    "This cannot be undone."
+                ),
+                icon="warning",
+                parent=self.root
+            )
+            if confirmed:
+                self.profiles.clear_profile(profile["id"])
+                self._refresh_profile_list()
+                messagebox.showinfo("Done",
+                                    f"\"{profile_name}\" profile has been cleared.",
+                                    parent=self.root)
 
 
     def _move_profile_up(self):

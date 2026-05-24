@@ -184,6 +184,21 @@ class ProfileManager:
             self._save()
 
 
+    def clear_profile(self, profile_id):
+        """
+        Removes all items from a named profile without deleting them from history.
+        Items remain accessible in General and any other profiles they belong to.
+        The General profile cannot be cleared this way — use history.clear_all() instead.
+        """
+        if profile_id == GENERAL_ID:
+            return
+        profile = self._find(profile_id)
+        if profile:
+            profile["item_ids"] = []
+            self._save()
+            print(f"Profile cleared: {profile_id}")
+
+
     def remove_item_from_all(self, item_id):
         """
         Removes an item from every profile.
@@ -232,7 +247,11 @@ class ProfileManager:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.profiles  = data.get("profiles", self._default_profiles())
-            self.active_id = data.get("active_id", GENERAL_ID)
+
+            # Always start on General when the app launches.
+            # This prevents the app opening on a named profile that looks
+            # empty — the user can switch to any profile once the app is open.
+            self.active_id = GENERAL_ID
 
             # Always ensure General exists as the first entry
             if not any(p["id"] == GENERAL_ID for p in self.profiles):

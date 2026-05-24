@@ -44,7 +44,7 @@ class TrayIcon:
             pystray.Menu.SEPARATOR,
             item(self._active_profile_label, self._do_nothing, enabled=False),
             pystray.Menu.SEPARATOR,
-            item("⚙  Settings", self._open_settings),
+            item("⚙  Settings", self._open_settings, default=True),
             item("🧹 Clear History", self._clear_history),
             pystray.Menu.SEPARATOR,
             item("✖  Quit ClipDrop", self._quit),
