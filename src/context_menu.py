@@ -1,294 +1,442 @@
 # ============================================================
 # ClipDrop - context_menu.py
 # ============================================================
-# This file handles all Windows right-click context menu
-# integration. It adds "Paste from ClipDrop" to the Windows
-# right-click menu and listens for when the user selects it.
+# Handles all right-click integration for ClipDrop.
 #
-# It works in two ways:
-#   1. REGISTRY  — adds the option to File Explorer & Desktop
-#   2. HOTKEY    — Ctrl+Shift+V triggers the popup from anywhere
+# HOW IT WORKS:
+#   A low-level Windows mouse hook detects every right-click
+#   system-wide — in any app, browser, text editor, HTML form,
+#   or anywhere else on Windows.
 #
-# Both methods open the same dropdown popup at the cursor.
+#   When a right-click is detected, a small floating button
+#   "📋 Paste from ClipDrop" appears near the cursor.
+#   The native right-click menu still opens as normal.
+#   Clicking our button opens the ClipDrop popup.
+#   The button disappears automatically after 3 seconds.
+#
+#   A global hotkey Ctrl+Shift+V also works as a backup trigger.
 # ============================================================
 
+import ctypes
+import ctypes.wintypes as wintypes
+import threading
+import time
+import tkinter as tk
+import keyboard
+import pyautogui
 import winreg
 import os
 import sys
-import threading
-import tempfile
-import time
-import keyboard   # Global hotkey listener
-import pyautogui
 
 
-# ---- Registry key paths ----
-# These are the locations in the Windows Registry where we add our menu item.
-# Think of the Registry like a giant settings book for Windows.
+# ---- Windows API constants ----
+WH_MOUSE_LL  = 14          # Low-level mouse hook ID
+WM_RBUTTONUP = 0x0205      # Right mouse button released
+WM_QUIT      = 0x0012      # Quit message for the hook thread
 
-# Adds to right-click on files and the desktop background
+# ---- Hotkey ----
+HOTKEY = "ctrl+shift+v"
+
+# ---- Registry paths (Desktop and File Explorer) ----
 REG_PATHS = [
-    r"*\shell\ClipDrop",                          # Right-click on any file
-    r"Directory\shell\ClipDrop",                  # Right-click on any folder
-    r"Directory\Background\shell\ClipDrop",       # Right-click on desktop/folder background
+    r"*\shell\ClipDrop",
+    r"Directory\shell\ClipDrop",
+    r"Directory\Background\shell\ClipDrop",
 ]
 
-# The command Windows runs when "Paste from ClipDrop" is clicked
-# It writes a signal file that our running app detects
-TRIGGER_SCRIPT = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "trigger_popup.py"
-)
-
-# A temporary file used as a signal between the registry command
-# and the running ClipDrop app
-SIGNAL_FILE = os.path.join(tempfile.gettempdir(), "clipdrop_trigger.signal")
-
-# The hotkey that also opens the popup (works in any app)
-HOTKEY = "ctrl+shift+v"
+# ---- Overlay appearance ----
+OVERLAY_COLOURS = {
+    "bg":     "#4f46e5",   # Indigo button background
+    "hover":  "#6366f1",   # Lighter on hover
+    "text":   "#ffffff",   # White text
+    "shadow": "#1e1e2e",   # Dark border
+}
 
 
 class ContextMenu:
 
     def __init__(self, history_manager, popup, root):
-        self.history = history_manager
-        self.popup   = popup    # Shared DropdownPopup from main.py
-        self.root    = root     # Shared tkinter root from main.py
-        self.running = False
+        self.history  = history_manager
+        self.popup    = popup    # Shared DropdownPopup
+        self.root     = root     # Shared tkinter root
+        self.running  = False
 
+        # The floating overlay button (a Toplevel window)
+        self.overlay  = None
+        self.overlay_timer = None   # Auto-hide timer
+
+        # Windows hook handle — needed to uninstall the hook later
+        self.hook_id  = None
+        self.hook_thread_id = None  # Thread ID of the hook thread
+
+
+    # ============================================================
+    # SETUP & TEARDOWN
+    # ============================================================
 
     def setup(self):
         """
-        Sets up both context menu integration methods:
-        1. Registers ClipDrop into the Windows right-click menu via Registry
-        2. Sets up a global hotkey (Ctrl+Shift+V)
-        3. Starts listening for triggers from both methods
+        Sets up all right-click integration:
+        1. Registry entries for Desktop and File Explorer
+        2. Global hotkey Ctrl+Shift+V
+        3. Low-level mouse hook for all other apps
         """
-        self._register_in_registry()
-        self._create_trigger_script()
-        self._setup_hotkey()
-
-        # Start listening for registry-triggered signals in the background
         self.running = True
-        signal_thread = threading.Thread(
-            target=self._listen_for_signal,
-            daemon=True
-        )
-        signal_thread.start()
-
-        print(f"Context menu ready. Hotkey: {HOTKEY}")
+        self._build_overlay()           # Build the floating button (hidden)
+        self._register_in_registry()    # Add to Desktop/Explorer right-click
+        self._setup_hotkey()            # Register Ctrl+Shift+V
+        self._install_mouse_hook()      # Start the global mouse hook
 
 
     def teardown(self):
-        """
-        Removes ClipDrop from the Windows Registry when the app closes.
-        This keeps the right-click menu clean after ClipDrop quits.
-        """
+        """Cleans up everything when ClipDrop quits."""
         self.running = False
+        self._uninstall_mouse_hook()
         self._remove_from_registry()
-        keyboard.remove_hotkey(HOTKEY)
+        try:
+            keyboard.remove_hotkey(HOTKEY)
+        except Exception:
+            pass
         print("Context menu removed.")
 
 
     # ============================================================
-    # METHOD 1 — WINDOWS REGISTRY
+    # FLOATING OVERLAY BUTTON
+    # ============================================================
+
+    def _build_overlay(self):
+        """
+        Builds the floating "📋 Paste from ClipDrop" button.
+        It is created once and hidden — shown/hidden as needed.
+        Uses root.after() to run on the main thread safely.
+        """
+        self.root.after(0, self._create_overlay_window)
+
+
+    def _create_overlay_window(self):
+        """Creates the actual overlay Toplevel window."""
+        self.overlay = tk.Toplevel(self.root)
+        self.overlay.overrideredirect(True)     # No title bar
+        self.overlay.attributes("-topmost", True)
+        self.overlay.attributes("-alpha", 0.95) # Slightly transparent
+        self.overlay.configure(bg=OVERLAY_COLOURS["shadow"])
+        self.overlay.withdraw()                 # Hidden until right-click
+
+        # The clickable button label
+        self.overlay_btn = tk.Label(
+            self.overlay,
+            text="📋  Paste from ClipDrop",
+            bg=OVERLAY_COLOURS["bg"],
+            fg=OVERLAY_COLOURS["text"],
+            font=("Segoe UI", 10, "bold"),
+            padx=14,
+            pady=8,
+            cursor="hand2"
+        )
+        self.overlay_btn.pack(padx=1, pady=1)
+
+        # Hover effects
+        self.overlay_btn.bind("<Enter>",
+            lambda e: self.overlay_btn.configure(bg=OVERLAY_COLOURS["hover"]))
+        self.overlay_btn.bind("<Leave>",
+            lambda e: self.overlay_btn.configure(bg=OVERLAY_COLOURS["bg"]))
+
+        # Click to open ClipDrop popup
+        self.overlay_btn.bind("<Button-1>", self._on_overlay_clicked)
+
+        # Hide if user clicks anywhere else
+        self.overlay.bind("<FocusOut>", lambda e: self._hide_overlay())
+
+
+    def _show_overlay(self, x, y):
+        """
+        Shows the floating button near the right-click position.
+        Schedules via root.after() to run on the main thread.
+        """
+        self.root.after(0, lambda: self._do_show_overlay(x, y))
+
+
+    def _do_show_overlay(self, x, y):
+        """Actually shows the overlay — runs on main thread."""
+        if not self.overlay:
+            return
+
+        # Cancel any existing auto-hide timer
+        if self.overlay_timer:
+            self.root.after_cancel(self.overlay_timer)
+            self.overlay_timer = None
+
+        # Position the button just above and to the right of the cursor
+        offset_x = 10
+        offset_y = -50
+
+        screen_w = self.overlay.winfo_screenwidth()
+        screen_h = self.overlay.winfo_screenheight()
+
+        # Measure button size
+        self.overlay.update_idletasks()
+        btn_w = self.overlay.winfo_reqwidth()
+        btn_h = self.overlay.winfo_reqheight()
+
+        # Keep it on screen
+        pos_x = min(x + offset_x, screen_w - btn_w - 10)
+        pos_y = max(y + offset_y, 10)
+
+        self.overlay.geometry(f"+{pos_x}+{pos_y}")
+        self.overlay.deiconify()
+        self.overlay.lift()
+
+        # Auto-hide after 3 seconds if not clicked
+        self.overlay_timer = self.root.after(3000, self._hide_overlay)
+
+
+    def _hide_overlay(self):
+        """Hides the floating button."""
+        if self.overlay:
+            try:
+                self.overlay.withdraw()
+            except Exception:
+                pass
+        if self.overlay_timer:
+            try:
+                self.root.after_cancel(self.overlay_timer)
+            except Exception:
+                pass
+            self.overlay_timer = None
+
+
+    def _on_overlay_clicked(self, event):
+        """
+        Called when the user clicks the floating button.
+        Hides the overlay and opens the ClipDrop popup.
+        """
+        self._hide_overlay()
+        x, y = pyautogui.position()
+        self.popup.show(x, y)
+
+
+    # ============================================================
+    # LOW-LEVEL MOUSE HOOK
+    # ============================================================
+
+    def _install_mouse_hook(self):
+        """
+        Installs a Windows low-level mouse hook (WH_MOUSE_LL).
+        This runs in a dedicated thread with its own message pump
+        so it can detect mouse events system-wide in any application.
+        """
+        hook_thread = threading.Thread(
+            target=self._run_hook_loop,
+            daemon=True
+        )
+        hook_thread.start()
+        print("Mouse hook installed.")
+
+
+    def _run_hook_loop(self):
+        """
+        Runs on a dedicated background thread.
+        Installs the WH_MOUSE_LL hook and runs a Windows message pump.
+
+        IMPORTANT: We must explicitly declare argtypes and restype for
+        every Windows API call involving pointers. On 64-bit Windows,
+        pointer values are 64-bit integers. Without type declarations,
+        ctypes defaults to 32-bit and overflows — causing the crash.
+        """
+        # Store this thread's ID so we can post WM_QUIT to it later
+        self.hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+
+        # --- Set up Windows API function signatures ---
+        # This tells ctypes exactly what types each function takes and returns
+        user32 = ctypes.windll.user32
+
+        # Define the hook callback type
+        # c_long return, c_int + WPARAM + LPARAM arguments
+        HOOKPROC = ctypes.WINFUNCTYPE(
+            ctypes.c_long,
+            ctypes.c_int,
+            wintypes.WPARAM,
+            wintypes.LPARAM
+        )
+
+        # Declare SetWindowsHookExW types
+        user32.SetWindowsHookExW.restype  = ctypes.c_void_p
+        user32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            HOOKPROC,
+            wintypes.HINSTANCE,
+            wintypes.DWORD
+        ]
+
+        # Declare CallNextHookEx types
+        # lParam must be LPARAM (pointer-sized) — this was causing the overflow
+        user32.CallNextHookEx.restype  = ctypes.c_long
+        user32.CallNextHookEx.argtypes = [
+            ctypes.c_void_p,   # hhk (hook handle)
+            ctypes.c_int,      # nCode
+            wintypes.WPARAM,   # wParam
+            wintypes.LPARAM    # lParam — pointer-sized, handles 64-bit correctly
+        ]
+
+        # Declare UnhookWindowsHookEx types
+        user32.UnhookWindowsHookEx.restype  = wintypes.BOOL
+        user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+
+        # Declare GetMessageW types
+        user32.GetMessageW.restype  = wintypes.BOOL
+        user32.GetMessageW.argtypes = [
+            ctypes.POINTER(wintypes.MSG),
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.UINT
+        ]
+
+        # Define the MSLLHOOKSTRUCT — mouse event data Windows sends us
+        class MSLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [
+                ("pt",          wintypes.POINT),
+                ("mouseData",   wintypes.DWORD),
+                ("flags",       wintypes.DWORD),
+                ("time",        wintypes.DWORD),
+                ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG)),
+            ]
+
+        def hook_proc(nCode, wParam, lParam):
+            """
+            Called by Windows for every mouse event system-wide.
+            nCode  — whether we should process this event (>= 0 = yes)
+            wParam — the mouse event type
+            lParam — pointer to MSLLHOOKSTRUCT with position data
+            """
+            try:
+                if nCode >= 0 and wParam == WM_RBUTTONUP:
+                    ms = ctypes.cast(
+                        lParam,
+                        ctypes.POINTER(MSLLHOOKSTRUCT)
+                    ).contents
+                    x = ms.pt.x
+                    y = ms.pt.y
+                    self._show_overlay(x, y)
+            except Exception as e:
+                print(f"Hook proc error: {e}")
+
+            # Always pass the event on — never block native right-click
+            return user32.CallNextHookEx(self.hook_id, nCode, wParam, lParam)
+
+        # Keep a reference to the callback — prevents Python garbage collecting it
+        self._hook_proc_ref = HOOKPROC(hook_proc)
+
+        # Install the hook system-wide
+        self.hook_id = user32.SetWindowsHookExW(
+            WH_MOUSE_LL,
+            self._hook_proc_ref,
+            None,
+            0       # 0 = monitor all threads system-wide
+        )
+
+        if not self.hook_id:
+            print("Failed to install mouse hook.")
+            return
+
+        print("Mouse hook running.")
+
+        # Message pump — Windows requires this to deliver hook events
+        msg = wintypes.MSG()
+        while self.running:
+            result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if result <= 0:
+                break
+            ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
+            ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+
+        # Clean up the hook when done
+        if self.hook_id:
+            user32.UnhookWindowsHookEx(self.hook_id)
+            self.hook_id = None
+            print("Mouse hook removed.")
+
+
+    def _uninstall_mouse_hook(self):
+        """
+        Stops the message pump loop by posting WM_QUIT
+        to the hook thread, causing it to exit cleanly.
+        """
+        if self.hook_thread_id:
+            ctypes.windll.user32.PostThreadMessageW(
+                self.hook_thread_id, WM_QUIT, 0, 0
+            )
+
+
+    # ============================================================
+    # GLOBAL HOTKEY
+    # ============================================================
+
+    def _setup_hotkey(self):
+        """
+        Registers Ctrl+Shift+V as a global hotkey.
+        Works in any application as an alternative trigger.
+        """
+        try:
+            keyboard.add_hotkey(
+                HOTKEY,
+                self._on_hotkey_triggered,
+                suppress=True
+            )
+            print(f"Hotkey registered: {HOTKEY}")
+        except Exception as e:
+            print(f"Hotkey error: {e}")
+
+
+    def _on_hotkey_triggered(self):
+        """Opens the popup at the current cursor position."""
+        x, y = pyautogui.position()
+        self.popup.show(x, y)
+
+
+    # ============================================================
+    # WINDOWS REGISTRY
     # ============================================================
 
     def _register_in_registry(self):
-        """
-        Writes entries into the Windows Registry to add
-        "Paste from ClipDrop" to the right-click context menu.
-
-        Each registry path gets two things:
-          - A display name ("Paste from ClipDrop")
-          - A command to run when clicked (our trigger script)
-        """
-        command = f'"{sys.executable}" "{TRIGGER_SCRIPT}"'
+        """Adds ClipDrop to the Desktop and File Explorer right-click menu."""
+        command = f'"{sys.executable}" -c "import tempfile, pyautogui; open(tempfile.gettempdir()+chr(92)+\'clipdrop.signal\',\'w\').write(str(pyautogui.position()))"'
 
         for reg_path in REG_PATHS:
             try:
-                # Open or create the registry key for ClipDrop
                 key = winreg.CreateKeyEx(
-                    winreg.HKEY_CLASSES_ROOT,
-                    reg_path,
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Classes\\" + reg_path,
                     0,
                     winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY
                 )
-
-                # Set the display name shown in the right-click menu
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from ClipDrop")
-
-                # Set the icon (uses Python's icon for now)
                 winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
-
                 winreg.CloseKey(key)
 
-                # Create the "command" sub-key with the actual command to run
                 cmd_key = winreg.CreateKeyEx(
-                    winreg.HKEY_CLASSES_ROOT,
-                    reg_path + r"\command",
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Classes\\" + reg_path + r"\command",
                     0,
                     winreg.KEY_SET_VALUE
                 )
                 winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, command)
                 winreg.CloseKey(cmd_key)
 
-                print(f"Registered: {reg_path}")
-
-            except PermissionError:
-                # Writing to HKEY_CLASSES_ROOT requires admin privileges
-                # If we don't have them, try the user-level registry instead
-                self._register_user_level(reg_path, command)
-
             except Exception as e:
-                print(f"Registry error for {reg_path}: {e}")
-
-
-    def _register_user_level(self, reg_path, command):
-        """
-        Fallback: registers in the current user's registry
-        instead of the system-wide registry.
-        This doesn't require admin privileges.
-        """
-        try:
-            user_path = r"Software\Classes\\" + reg_path
-            key = winreg.CreateKeyEx(
-                winreg.HKEY_CURRENT_USER,
-                user_path,
-                0,
-                winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY
-            )
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from ClipDrop")
-            winreg.CloseKey(key)
-
-            cmd_key = winreg.CreateKeyEx(
-                winreg.HKEY_CURRENT_USER,
-                user_path + r"\command",
-                0,
-                winreg.KEY_SET_VALUE
-            )
-            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, command)
-            winreg.CloseKey(cmd_key)
-
-            print(f"Registered (user level): {reg_path}")
-
-        except Exception as e:
-            print(f"User-level registry error: {e}")
+                print(f"Registry error: {e}")
 
 
     def _remove_from_registry(self):
-        """
-        Removes all ClipDrop entries from the Windows Registry.
-        Called when the app quits to keep things clean.
-        """
+        """Removes all ClipDrop registry entries on quit."""
         for reg_path in REG_PATHS:
-            for root in [winreg.HKEY_CLASSES_ROOT, winreg.HKEY_CURRENT_USER]:
-                try:
-                    path = reg_path if root == winreg.HKEY_CLASSES_ROOT \
-                        else r"Software\Classes\\" + reg_path
-
-                    winreg.DeleteKey(root, path + r"\command")
-                    winreg.DeleteKey(root, path)
-                except Exception:
-                    pass  # Key might not exist — that's fine
-
-
-    # ============================================================
-    # METHOD 2 — GLOBAL HOTKEY (Ctrl+Shift+V)
-    # ============================================================
-
-    def _setup_hotkey(self):
-        """
-        Registers Ctrl+Shift+V as a global hotkey.
-        This works in any application — a browser, text editor, game, etc.
-        When pressed, it immediately opens the ClipDrop popup at the cursor.
-        """
-        keyboard.add_hotkey(
-            HOTKEY,
-            self._on_hotkey_triggered,
-            suppress=True   # Prevents Ctrl+Shift+V from doing anything else
-        )
-        print(f"Hotkey registered: {HOTKEY}")
-
-
-    def _on_hotkey_triggered(self):
-        """
-        Called instantly when Ctrl+Shift+V is pressed.
-        Gets the current mouse position and shows the popup there.
-        """
-        x, y = pyautogui.position()
-        threading.Thread(
-            target=self.popup.show,
-            args=(x, y),
-            daemon=True
-        ).start()
-
-
-    # ============================================================
-    # SIGNAL FILE (IPC — how the registry trigger talks to the app)
-    # ============================================================
-
-    def _create_trigger_script(self):
-        """
-        Creates a tiny Python script called trigger_popup.py.
-        When the user clicks "Paste from ClipDrop" in the right-click menu,
-        Windows runs this script. The script writes a signal file that
-        tells the running ClipDrop app to open the popup.
-
-        Why a separate script?
-        The registry can only run a command — it can't directly call
-        a function inside our running app. So we use a signal file
-        as a messenger between the two.
-        """
-        script_content = f'''
-import tempfile
-import os
-import pyautogui
-
-# Write a signal file with the current cursor position
-signal_file = r"{SIGNAL_FILE}"
-x, y = pyautogui.position()
-
-with open(signal_file, "w") as f:
-    f.write(f"{{x}},{{y}}")
-'''
-        with open(TRIGGER_SCRIPT, "w") as f:
-            f.write(script_content)
-
-        print("Trigger script created.")
-
-
-    def _listen_for_signal(self):
-        """
-        Runs continuously in the background, checking every 0.3 seconds
-        for the signal file that trigger_popup.py creates.
-
-        When found:
-        1. Reads the cursor position from the file
-        2. Deletes the file (so it doesn't trigger again)
-        3. Opens the popup at that position
-        """
-        while self.running:
-            if os.path.exists(SIGNAL_FILE):
-                try:
-                    # Read cursor position from the signal file
-                    with open(SIGNAL_FILE, "r") as f:
-                        coords = f.read().strip()
-
-                    # Delete the signal file immediately
-                    os.remove(SIGNAL_FILE)
-
-                    # Parse the x,y coordinates
-                    x, y = map(int, coords.split(","))
-
-                    # Open the popup at that position
-                    threading.Thread(
-                        target=self.popup.show,
-                        args=(x, y),
-                        daemon=True
-                    ).start()
-
-                except Exception as e:
-                    print(f"Signal error: {e}")
-
-            time.sleep(0.3)  # Check every 0.3 seconds
+            try:
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Classes\\" + reg_path + r"\command"
+                )
+                winreg.DeleteKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Classes\\" + reg_path
+                )
+            except Exception:
+                pass

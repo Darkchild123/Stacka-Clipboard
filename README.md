@@ -209,35 +209,89 @@ These bugs were discovered during the first live test of ClipDrop v1.0 and are a
 
 ### 🐛 Bug 1 — Popup Flickers and Vanishes on Second Trigger
 
-**Status:** 🔧 Fix in progress
+**Status:** ✅ Resolved
 
-**What happens:**
-The dropdown popup appears correctly the first time it is triggered. On the second trigger, a Python window flashes on screen briefly and disappears repeatedly without showing the popup.
+**What happened:**
+The dropdown popup appeared correctly the first time it was triggered. On the second trigger, a Python window flashed on screen briefly and disappeared repeatedly without showing the popup.
 
 **Root cause:**
-`tkinter` (the UI library used for the popup) only allows one main window (`Tk()`) to exist at a time. Every time the popup is triggered, the code tries to create a brand new main window — causing a conflict that results in the flickering behaviour.
+`tkinter` (the UI library used for the popup) only allows one main window (`Tk()`) to exist at a time. Every time the popup was triggered, the code tried to create a brand new main window — causing a conflict that resulted in the flickering behaviour.
 
-**Planned fix:**
-Restructure `dropdown_popup.py` to reuse a single persistent window instead of creating a new one each time it is triggered.
+**How it was fixed:**
+The popup was restructured to use `Toplevel` — a child window of a single shared `Tk()` root — instead of creating a new `Tk()` instance every time. The root window is created once at startup in `main.py` and shared across the entire app. The popup simply shows and hides this child window on demand using `deiconify()` and `withdraw()`, eliminating the conflict entirely.
 
-**File affected:** `src/dropdown_popup.py`
+**Files changed:** `src/main.py`, `src/dropdown_popup.py`
 
 ---
 
-### 🐛 Bug 2 — "Paste from ClipDrop" Only Appears on the Desktop
+### 🐛 Bug 2 — Tray Icon Not Running
 
-**Status:** 🔧 Fix in progress
+**Status:** ✅ Resolved
 
-**What happens:**
-The "Paste from ClipDrop" option appears correctly when right-clicking on the Desktop or inside File Explorer. It does not appear when right-clicking inside applications such as Notepad, browsers, or HTML forms.
+**What happened:**
+After the popup fix, the system tray icon stopped appearing. ClipDrop launched but showed no tray icon, making it impossible to access settings or quit the app cleanly.
 
 **Root cause:**
-Windows has two separate types of right-click menus. The Windows Registry approach (used in v1.0) only covers the Windows Shell — the Desktop and File Explorer. Applications like Notepad, Chrome, and Word build their own right-click menus independently and do not allow external injection via the Registry.
+`tkinter` and `pystray` (the tray icon library) both require ownership of the main thread to run their event loops. They were fighting each other — whichever started second would fail silently.
 
-**Planned fix:**
-Implement a low-level system-wide mouse hook that intercepts right-click events at the Windows level — before any application handles them. This will display a custom ClipDrop menu overlay across all applications. The existing `Ctrl+Shift+V` hotkey will also be promoted as a primary trigger that works everywhere without needing a right-click.
+**How it was fixed:**
+The app architecture was restructured so that `tkinter` exclusively owns the main thread via `root.mainloop()`. All other components — `pystray`, the clipboard watcher, and the context menu — were moved to background daemon threads. A shared `root` object is passed between components, and `root.after()` is used as a safe messenger to trigger UI updates from background threads onto the main thread.
 
-**File affected:** `src/context_menu.py`
+**Files changed:** `src/main.py`, `src/tray_icon.py`, `src/context_menu.py`, `src/dropdown_popup.py`
+
+---
+
+### 🐛 Bug 3 — File Paste Not Working
+
+**Status:** ✅ Resolved
+
+**What happened:**
+Copying a file and selecting it from the ClipDrop popup did nothing — the file was not pasted into the destination.
+
+**Root cause — wrong binary structure:**
+Windows requires file clipboard data (`CF_HDROP`) in a precise binary format called a `DROPFILES` structure — a 20-byte header followed by Unicode file paths each separated by null characters. The original code packed the header as 24 bytes (6 integers) instead of the correct 20 bytes (5 integers), causing Windows to silently reject the data.
+
+**Root cause — clipboard loop:**
+When ClipDrop restored the file path to the clipboard before pasting, the clipboard watcher detected this as a new copy event and tried to save it as a new history item — interfering with the paste operation.
+
+**How it was fixed:**
+The `DROPFILES` header was corrected to exactly 20 bytes using `struct.pack("<5I", 20, 0, 0, 0, 1)`. A `paused` flag was added to the clipboard watcher — the watcher skips checking while ClipDrop is performing a paste, then automatically resumes after 0.5 seconds, preventing the loop.
+
+**Files changed:** `src/dropdown_popup.py`, `src/clipboard_watcher.py`
+
+---
+
+### 🐛 Bug 4 — "Paste from ClipDrop" Only Appears on the Desktop
+
+**Status:** ✅ Resolved
+
+**What happened:**
+The "Paste from ClipDrop" option appeared correctly when right-clicking on the Desktop or inside File Explorer. It did not appear when right-clicking inside applications such as Notepad, browsers, or HTML forms.
+
+**Root cause:**
+Windows has two separate types of right-click menus. The Windows Registry approach only covers the Windows Shell — the Desktop and File Explorer. Applications like Notepad, Chrome, and Word build their own right-click menus independently and do not allow external injection via the Registry.
+
+**How it was fixed:**
+A low-level Windows mouse hook (`WH_MOUSE_LL`) was implemented using the Windows API via Python's `ctypes` library. This hook detects every right-click system-wide — in any application, browser, text editor, or HTML form. When a right-click is detected, a small floating **"📋 Paste from ClipDrop"** button appears near the cursor. The native right-click menu still opens as normal. Clicking the button opens the ClipDrop popup. The button auto-disappears after 3 seconds if not clicked. The `Ctrl+Shift+V` hotkey remains available as a keyboard alternative.
+
+**Files changed:** `src/context_menu.py`
+
+---
+
+### 🐛 Bug 5 — App Quits on Its Own / Mouse Freezes
+
+**Status:** ✅ Resolved
+
+**What happened:**
+Two symptoms appeared together: the app would quit unexpectedly with the tray icon disappearing, and the mouse would freeze completely requiring Ctrl+Alt+Del to recover.
+
+**Root cause:**
+The low-level mouse hook callback (`hook_proc`) was crashing with an `OverflowError` on every single mouse event. On 64-bit Windows, the `lParam` pointer passed to `CallNextHookEx` is a 64-bit integer. Without explicit type declarations, `ctypes` defaulted to treating it as 32-bit, causing it to overflow. The crash happened silently on every mouse movement, flooding the console with errors, jamming the mouse event queue, and eventually killing background threads which caused the app to appear to quit.
+
+**How it was fixed:**
+Explicit `argtypes` and `restype` were declared for every Windows API call involved in the hook — `SetWindowsHookExW`, `CallNextHookEx`, `UnhookWindowsHookEx`, and `GetMessageW`. Declaring `wintypes.LPARAM` for the `lParam` argument tells `ctypes` to handle it as a pointer-sized 64-bit value, eliminating the overflow. Additionally, a `protected_thread()` wrapper was added in `main.py` — every background component now runs inside a `try/except` so a crash in one thread never takes down the whole app.
+
+**Files changed:** `src/context_menu.py`, `src/main.py`
 
 ---
 
@@ -246,8 +300,15 @@ Implement a low-level system-wide mouse hook that intercepts right-click events 
 | 2026-05-07 | Project concept defined, design document completed |
 | 2026-05-07 | Project folder and GitHub repository initialized |
 | 2026-05-15 | All 7 source files written — core engine, UI, and Windows integration |
-| 2026-05-15 | First live test — app launches, tray icon works, clipboard monitoring works |
-| 2026-05-15 | First live test — popup shows on first trigger, 2 bugs identified and documented |
+| 2026-05-15 | First live test — app launches, tray icon works, clipboard monitoring confirmed |
+| 2026-05-15 | 3 bugs identified and documented during first live test |
+| 2026-05-20 | Bug 1 fixed — popup flicker resolved by switching to Toplevel window pattern |
+| 2026-05-20 | Bug 2 fixed — tray icon restored by restructuring threading architecture |
+| 2026-05-20 | Bug 3 fixed — file paste corrected with proper CF_HDROP binary format and clipboard loop prevention |
+| 2026-05-20 | App confirmed stable — text and file copy/paste working correctly |
+| 2026-05-24 | Bug 4 fixed — right-click overlay now works in all apps via low-level mouse hook |
+| 2026-05-24 | Bug 5 fixed — ctypes 64-bit overflow resolved, crash protection added to all threads |
+| 2026-05-24 | App confirmed working — right-click overlay, hotkey, tray icon all stable |
 
 ---
 
