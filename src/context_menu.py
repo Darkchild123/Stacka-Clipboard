@@ -377,12 +377,24 @@ class ContextMenu:
             PAD  = 10
             EDGE = 5
 
-            # Horizontal: opposite side from where menu opened
-            if x < screen_w // 2:
-                # Menu is to the RIGHT → button goes LEFT of cursor
+            # Dead zone detection — the centre 20% of the screen in both axes
+            # (X: 40%–60%, Y: 40%–60%).  In this region Windows has maximum
+            # freedom to open the menu in any direction, so cursor-position
+            # prediction is unreliable.  We always place the button LEFT of
+            # the cursor here — consistent and out of the way.
+            in_dead_zone = (
+                screen_w * 0.40 <= x <= screen_w * 0.60 and
+                screen_h * 0.40 <= y <= screen_h * 0.60
+            )
+
+            if in_dead_zone:
+                # Dead zone → always LEFT of cursor
+                pos_x = max(EDGE, x - btn_w - PAD)
+            elif x < screen_w // 2:
+                # Left half → menu opens RIGHT → button goes LEFT of cursor
                 pos_x = max(EDGE, x - btn_w - PAD)
             else:
-                # Menu is to the LEFT → button goes RIGHT of cursor
+                # Right half → menu opens LEFT → button goes RIGHT of cursor
                 pos_x = min(x + PAD, screen_w - btn_w - EDGE)
 
             # Vertical: opposite side from where menu opened
