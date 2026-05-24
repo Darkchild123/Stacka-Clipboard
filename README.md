@@ -295,6 +295,65 @@ Explicit `argtypes` and `restype` were declared for every Windows API call invol
 
 ---
 
+### 🐛 Bug 6 — Overlay Button Closes Native Context Menu
+
+**Status:** ✅ Resolved
+
+**What happened:**
+When the floating "📋 Paste from ClipDrop" button appeared after a right-click, the native context menu would immediately flash and disappear, leaving only the ClipDrop button on screen.
+
+**Root cause:**
+`focus_force()` was being called on the overlay window after it appeared. Windows closes a context menu the instant it loses focus. Calling `focus_force()` on our overlay stole focus away from the context menu, causing Windows to close it immediately.
+
+**How it was fixed:**
+Removed `focus_force()` from the overlay display logic entirely. The overlay button is fully clickable without having focus — it just needs to be visible. The `<FocusOut>` binding on the overlay was also removed since it served no purpose once the overlay no longer takes focus.
+
+**Files changed:** `src/context_menu.py`
+
+---
+
+### 🐛 Bug 7 — Overlay Button Overlapping the Context Menu
+
+**Status:** ✅ Resolved
+
+**What happened:**
+The floating "📋 Paste from ClipDrop" button was appearing on top of the native context menu in many apps, making both hard to use.
+
+**Root cause — timing:**
+The context menu window search ran immediately on the main thread. Many apps take longer than 120ms to render their context menu, so the search returned nothing and the fallback placed the button near the cursor — right where the menu had just appeared.
+
+**Root cause — clamping overlap:**
+When the context menu sat near the bottom of the screen, the "below" placement was calculated correctly but screen-edge clamping pulled the button back up into the menu. The code committed to a direction before verifying the clamped position was actually clear.
+
+**Root cause — fallback positioning:**
+When the menu window could not be found at all (many apps and HTML forms do not use the standard Windows `#32768` menu class), the fallback guessed a position near the cursor without knowing where the menu was, often landing directly on it.
+
+**How it was fixed:**
+Three separate fixes were applied. First, the context menu search was moved to a background thread with retry logic — polling up to 300ms in short bursts so slower apps have time to render their menu before we calculate position. Second, the `_best_position()` function was rewritten to calculate the exact clamped position for each of the four directions, verify it does not overlap the menu after clamping, and try the next direction if it does. Third, the fallback (for apps where no menu window is found) was rebuilt using Windows' predictable menu placement rule: the menu always opens away from the nearest screen edge, so the button is placed on the opposite horizontal side of the cursor. A dead zone (centre 20% of screen width and height) was also identified where prediction is unreliable — in that zone the button always appears to the left of the cursor regardless of other conditions.
+
+**Files changed:** `src/context_menu.py`
+
+---
+
+### 🐛 Bug 8 — "Paste from ClipDrop" in Explorer Does Nothing
+
+**Status:** ✅ Resolved
+
+**What happened:**
+Clicking "Paste from ClipDrop" from the Windows Desktop or File Explorer right-click menu produced no response — no popup appeared and no error was shown.
+
+**Root cause:**
+The Windows Registry command correctly fired when clicked, writing a signal file (`clipdrop.signal`) to the temp folder containing the cursor position. However, the running ClipDrop app had no code watching for that file. The signal was written and silently ignored.
+
+A secondary issue was that `pyautogui.position()` writes its output as `Point(x=1204, y=540)` rather than a plain `(1204, 540)` tuple string, causing the position parser to crash when it eventually was implemented.
+
+**How it was fixed:**
+A background thread (`_watch_signal_file`) was added to `context_menu.py`. It polls the temp folder every 200ms for the signal file. When found, it reads the position using regex to correctly parse the `Point(x=..., y=...)` format, deletes the file, and triggers the ClipDrop popup at that position.
+
+**Files changed:** `src/context_menu.py`
+
+---
+
 | Date | Milestone |
 |---|---|
 | 2026-05-07 | Project concept defined, design document completed |
@@ -309,6 +368,9 @@ Explicit `argtypes` and `restype` were declared for every Windows API call invol
 | 2026-05-24 | Bug 4 fixed — right-click overlay now works in all apps via low-level mouse hook |
 | 2026-05-24 | Bug 5 fixed — ctypes 64-bit overflow resolved, crash protection added to all threads |
 | 2026-05-24 | App confirmed working — right-click overlay, hotkey, tray icon all stable |
+| 2026-05-25 | Bug 6 fixed — overlay no longer closes native context menu (removed focus_force) |
+| 2026-05-25 | Bug 7 fixed — overlay button positioning overhauled with retry logic, border math, and dead zone handling |
+| 2026-05-25 | Bug 8 fixed — "Paste from ClipDrop" in Explorer now triggers popup via signal file watcher |
 
 ---
 

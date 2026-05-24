@@ -102,12 +102,15 @@ class ContextMenu:
         1. Registry entries for Desktop and File Explorer
         2. Global hotkey Ctrl+Shift+V
         3. Low-level mouse hook for all other apps
+        4. Signal file watcher for registry-triggered popup
         """
         self.running = True
         self._build_overlay()           # Build the floating button (hidden)
         self._register_in_registry()    # Add to Desktop/Explorer right-click
         self._setup_hotkey()            # Register Ctrl+Shift+V
         self._install_mouse_hook()      # Start the global mouse hook
+        threading.Thread(               # Watch for registry signal file
+            target=self._watch_signal_file, daemon=True).start()
 
 
     def teardown(self):
@@ -436,6 +439,51 @@ class ContextMenu:
         self._hide_overlay()
         x, y = pyautogui.position()
         self.popup.show(x, y)
+
+
+    # ============================================================
+    # REGISTRY SIGNAL FILE WATCHER
+    # ============================================================
+
+    def _watch_signal_file(self):
+        """
+        Watches for the signal file written by the Windows Registry command.
+
+        When the user clicks "Paste from ClipDrop" in the Desktop or
+        File Explorer right-click menu, the registry command fires a
+        separate pythonw.exe process that writes:
+            %TEMP%\\clipdrop.signal
+        containing the cursor position at the time of the click.
+
+        This thread polls for that file every 200ms.  When found it:
+          1. Reads the cursor position
+          2. Deletes the file so it won't trigger again
+          3. Opens the ClipDrop popup at that position
+        """
+        import tempfile
+        signal_path = os.path.join(tempfile.gettempdir(), "clipdrop.signal")
+
+        while self.running:
+            try:
+                if os.path.exists(signal_path):
+                    with open(signal_path, "r") as f:
+                        content = f.read().strip()
+                    os.remove(signal_path)
+
+                    # pyautogui.position() writes "Point(x=1204, y=540)"
+                    # Extract the two integers with regex
+                    import re
+                    nums = re.findall(r"\d+", content)
+                    x = int(nums[0])
+                    y = int(nums[1])
+
+                    self.popup.show(x, y)
+                    print(f"Registry trigger received at ({x}, {y})")
+
+            except Exception as e:
+                print(f"Signal file error: {e}")
+
+            time.sleep(0.2)
 
 
     # ============================================================
