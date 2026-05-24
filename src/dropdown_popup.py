@@ -13,10 +13,13 @@ import tkinter as tk
 from PIL import Image, ImageTk
 import win32clipboard
 import win32con
+import win32gui
 import pyautogui
 import os
 import time
 import io
+
+DRAG_THRESHOLD = 6   # pixels of movement before drag mode activates
 
 
 # --- Colours ---
@@ -58,6 +61,17 @@ class DropdownPopup:
         self.watcher = watcher    # Used to pause watching during paste
         self.window  = None       # The popup Toplevel window
         self.thumbnails = []      # Keep image references alive
+
+        # Drag state — used to track window repositioning (header drag)
+        self._drag_x = 0
+        self._drag_y = 0
+
+        # Item drag-and-drop state
+        self._drag_item    = None   # Item being dragged
+        self._drag_ghost   = None   # Ghost Toplevel that follows the cursor
+        self._drag_start_x = 0
+        self._drag_start_y = 0
+        self._is_dragging  = False
 
         # Bind Escape key globally to close popup
         self.root.bind_all("<Escape>", lambda e: self.hide())
@@ -149,22 +163,28 @@ class DropdownPopup:
         inner = tk.Frame(border, bg=COLOURS["bg"])
         inner.pack(fill="both", expand=True)
 
-        # Header
+        # Header — also acts as the drag handle for repositioning the popup
         header = tk.Frame(inner, bg=COLOURS["accent"], height=32)
         header.pack(fill="x")
         header.pack_propagate(False)
 
-        tk.Label(
-            header, text="📋  ClipDrop",
+        lbl_title = tk.Label(
+            header, text="📋  ClipDrop  ✥",
             bg=COLOURS["accent"], fg="white",
             font=("Segoe UI", 10, "bold"), padx=PADDING
-        ).pack(side="left", fill="y")
+        )
+        lbl_title.pack(side="left", fill="y")
 
-        tk.Label(
+        lbl_count = tk.Label(
             header, text=f"{len(items)} items",
             bg=COLOURS["accent"], fg="#c7d2fe",
             font=FONT_SOURCE, padx=PADDING
-        ).pack(side="right", fill="y")
+        )
+        lbl_count.pack(side="right", fill="y")
+
+        # Make the entire header row draggable
+        for widget in (header, lbl_title, lbl_count):
+            self._make_draggable(widget)
 
         # Scrollable canvas
         content_height = min(len(items) * ITEM_HEIGHT, MAX_HEIGHT)
@@ -248,9 +268,13 @@ class DropdownPopup:
         )
         source_label.pack(anchor="w")
 
-        # Click to paste
+        # Click to paste — drag to drop elsewhere
+        # ButtonPress starts tracking, B1-Motion activates drag mode if threshold
+        # exceeded, ButtonRelease decides whether it was a click or a drop.
         for widget in [row, text_frame, preview_label, source_label]:
-            widget.bind("<Button-1>", lambda e, i=item: self._paste_item(i))
+            widget.bind("<ButtonPress-1>",   lambda e, i=item: self._on_item_press(e, i))
+            widget.bind("<B1-Motion>",       lambda e, i=item: self._on_item_drag(e, i))
+            widget.bind("<ButtonRelease-1>", lambda e, i=item: self._on_item_release(e, i))
 
         # Action buttons
         btn_frame = tk.Frame(row, bg=bg)
@@ -265,6 +289,31 @@ class DropdownPopup:
             lambda i=item: self._move_down(i), COLOURS["text_dim"])
         self._make_button(btn_frame, "✕",
             lambda i=item: self._delete_item(i), COLOURS["danger"])
+
+
+    def _make_draggable(self, widget):
+        """
+        Makes the popup window draggable by the given widget.
+        Bind this to the header bar and its child labels so the user
+        can reposition the popup by dragging from the title area.
+        The cursor changes to a move icon to hint that dragging is possible.
+        """
+        widget.configure(cursor="fleur")
+        widget.bind("<Button-1>",  self._on_drag_start)
+        widget.bind("<B1-Motion>", self._on_drag_motion)
+
+
+    def _on_drag_start(self, event):
+        """Records the offset of the click relative to the window's top-left."""
+        self._drag_x = event.x_root - self.window.winfo_x()
+        self._drag_y = event.y_root - self.window.winfo_y()
+
+
+    def _on_drag_motion(self, event):
+        """Moves the window to follow the mouse during a drag."""
+        new_x = event.x_root - self._drag_x
+        new_y = event.y_root - self._drag_y
+        self.window.geometry(f"+{new_x}+{new_y}")
 
 
     def _build_thumbnail(self, parent, item, bg):
@@ -294,7 +343,9 @@ class DropdownPopup:
             padx=4, pady=2, cursor="hand2"
         )
         btn.pack(side="top", pady=1)
-        btn.bind("<Button-1>", lambda e: command())
+        # Return "break" so the click does not propagate up to the item row
+        # (which would accidentally trigger a paste alongside the button action)
+        btn.bind("<Button-1>", lambda e, c=command: (c(), "break")[1])
         btn.bind("<Enter>", lambda e: btn.configure(bg=COLOURS["bg_hover"]))
         btn.bind("<Leave>", lambda e: btn.configure(bg=COLOURS["bg_item"]))
 
@@ -302,6 +353,109 @@ class DropdownPopup:
     # ============================================================
     # ACTIONS
     # ============================================================
+
+    def _on_item_press(self, event, item):
+        """Records the press position so we can detect drag vs click."""
+        self._drag_item    = item
+        self._drag_start_x = event.x_root
+        self._drag_start_y = event.y_root
+        self._is_dragging  = False
+
+
+    def _on_item_drag(self, event, item):
+        """
+        Called while the mouse moves with button held.
+        Once the cursor travels more than DRAG_THRESHOLD pixels, drag mode
+        activates and a ghost preview window follows the cursor.
+        """
+        if not self._is_dragging:
+            dx = abs(event.x_root - self._drag_start_x)
+            dy = abs(event.y_root - self._drag_start_y)
+            if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
+                self._is_dragging = True
+                self._drag_ghost  = self._create_drag_ghost(item)
+
+        if self._is_dragging and self._drag_ghost:
+            # Ghost follows cursor with a small offset so the cursor stays visible
+            self._drag_ghost.geometry(
+                f"+{event.x_root + 14}+{event.y_root + 14}"
+            )
+
+
+    def _on_item_release(self, event, item):
+        """
+        Mouse button released.
+        Short movement = click → paste into currently active window.
+        Long movement  = drag → drop at the release position.
+        """
+        if self._is_dragging:
+            drop_x, drop_y = event.x_root, event.y_root
+
+            if self._drag_ghost:
+                self._drag_ghost.destroy()
+                self._drag_ghost = None
+            self._is_dragging = False
+            self._drag_item   = None
+
+            # Hide the popup first, then perform the drop after a short delay
+            # so the popup is fully gone before we click the target
+            self.hide()
+            self.root.after(150, lambda: self._do_drop(item, drop_x, drop_y))
+        else:
+            # Simple click — paste into the currently focused app
+            self._paste_item(item)
+
+
+    def _create_drag_ghost(self, item):
+        """
+        Creates a small semi-transparent preview window that follows the
+        cursor while the user is dragging an item.
+        """
+        ghost = tk.Toplevel(self.root)
+        ghost.overrideredirect(True)
+        ghost.attributes("-topmost", True)
+        ghost.attributes("-alpha", 0.85)
+        ghost.configure(bg=COLOURS["accent"])
+
+        icon    = "📄" if item["type"] == "text" else (
+                  "🖼️" if item["type"] == "image" else "📁")
+        preview = self.history.get_preview(item)
+
+        tk.Label(
+            ghost,
+            text=f"{icon}  {preview[:40]}",
+            bg=COLOURS["accent"], fg="white",
+            font=("Segoe UI", 9, "bold"),
+            padx=10, pady=5
+        ).pack()
+
+        x, y = pyautogui.position()
+        ghost.geometry(f"+{x + 14}+{y + 14}")
+        ghost.deiconify()
+        return ghost
+
+
+    def _do_drop(self, item, x, y):
+        """
+        Performs the drop at screen position (x, y).
+
+        Clicks at the drop point to:
+          - Focus the target window
+          - Place the text cursor at that exact position (for text editors/fields)
+
+        Then puts the item in the clipboard and simulates Ctrl+V to paste.
+        This gives the user drag-to-drop behaviour using the same reliable
+        clipboard + paste mechanism as a normal ClipDrop paste.
+        """
+        try:
+            pyautogui.click(x, y)
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Drop click error: {e}")
+
+        # Reuse the existing paste logic — handles text, files, and images
+        self._do_paste(item)
+
 
     def _paste_item(self, item):
         """Hides popup, restores item to clipboard, simulates Ctrl+V."""

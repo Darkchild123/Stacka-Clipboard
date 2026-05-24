@@ -33,9 +33,10 @@ import psutil
 
 
 # ---- Windows API constants ----
-WH_MOUSE_LL  = 14          # Low-level mouse hook ID
-WM_RBUTTONUP = 0x0205      # Right mouse button released
-WM_QUIT      = 0x0012      # Quit message for the hook thread
+WH_MOUSE_LL   = 14         # Low-level mouse hook ID
+WM_RBUTTONUP  = 0x0205     # Right mouse button released
+WM_LBUTTONDOWN = 0x0201    # Left mouse button pressed
+WM_QUIT       = 0x0012     # Quit message for the hook thread
 
 # ---- Hotkey ----
 HOTKEY = "ctrl+shift+v"
@@ -580,14 +581,23 @@ class ContextMenu:
             lParam — pointer to MSLLHOOKSTRUCT with position data
             """
             try:
-                if nCode >= 0 and wParam == WM_RBUTTONUP:
+                if nCode >= 0:
                     ms = ctypes.cast(
                         lParam,
                         ctypes.POINTER(MSLLHOOKSTRUCT)
                     ).contents
                     x = ms.pt.x
                     y = ms.pt.y
-                    self._show_overlay(x, y)
+
+                    if wParam == WM_RBUTTONUP:
+                        self._show_overlay(x, y)
+
+                    elif wParam == WM_LBUTTONDOWN:
+                        # Hide the ClipDrop popup if a left-click lands outside it
+                        self.root.after(
+                            0, lambda cx=x, cy=y: self._hide_popup_if_outside(cx, cy)
+                        )
+
             except Exception as e:
                 print(f"Hook proc error: {e}")
 
@@ -625,6 +635,31 @@ class ContextMenu:
             user32.UnhookWindowsHookEx(self.hook_id)
             self.hook_id = None
             print("Mouse hook removed.")
+
+
+    def _hide_popup_if_outside(self, click_x, click_y):
+        """
+        Called on every left-click system-wide.
+        If the ClipDrop dropdown popup is open and the click landed
+        outside its bounds, hide it.
+
+        This replaces tkinter's unreliable FocusOut detection for the popup —
+        especially necessary in Windows Explorer and other shell windows where
+        focus events don't always propagate correctly to overrideredirect windows.
+        """
+        win = self.popup.window
+        if not win:
+            return
+        try:
+            wx = win.winfo_x()
+            wy = win.winfo_y()
+            ww = win.winfo_width()
+            wh = win.winfo_height()
+            inside = (wx <= click_x <= wx + ww and wy <= click_y <= wy + wh)
+            if not inside:
+                self.popup.hide()
+        except Exception:
+            pass
 
 
     def _uninstall_mouse_hook(self):

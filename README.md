@@ -67,6 +67,7 @@ ClipDrop solves this by:
 | 🧹 Clear All History | One-click clear from Settings or tray menu |
 | ↕️ Reorder Items | Manually move items up or down the list to suit your workflow |
 | 🔍 Source Tracking | Each item shows where it was copied from — file path, directory, or URL |
+| 🖐️ Draggable Popup | Drag the ClipDrop popup by its header to reposition it anywhere on screen |
 
 ---
 
