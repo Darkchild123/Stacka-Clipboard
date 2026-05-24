@@ -39,3 +39,6 @@ settings/*.json
 *.msi
 *.zip
 
+# Auto-generated runtime files (created by the app, not for version control)
+src/trigger_popup.py
+
