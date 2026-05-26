@@ -24,7 +24,9 @@ IMAGES_DIR = os.path.join(DATA_DIR, "images")
 
 # Default settings
 DEFAULT_SETTINGS = {
-    "history_limit": 50  # How many items to keep by default
+    "history_limit": 50,   # How many items to keep by default
+    "theme":         "dark",  # "dark" or "light"
+    "transparency":  1.0      # Popup opacity: 0.5 (very see-through) to 1.0 (solid)
 }
 
 
@@ -103,6 +105,18 @@ class HistoryManager:
         - File: file name(s)
         - Image: "📷 Image"
         """
+        if item["type"] == "url":
+            url = item["content"].strip()
+            return url[:120] + "..." if len(url) > 120 else url
+
+        if item["type"] in ("code", "bash"):
+            import re
+            # Show the first non-empty line as the preview
+            first_line = next(
+                (l.strip() for l in item["content"].splitlines() if l.strip()), ""
+            )
+            return first_line[:120] + "..." if len(first_line) > 120 else first_line
+
         if item["type"] == "text":
             # Strip leading/trailing whitespace so the preview always starts
             # with real characters, not blank lines from how text was selected.
@@ -235,7 +249,16 @@ class HistoryManager:
         self._save_settings()
         self._enforce_limit()
         self._save_history()
-        print(f"History limit set to {new_limit}.")
+
+
+    def save_setting(self, key, value):
+        """
+        Saves a single setting by key.
+        Used by the Settings panel for theme, transparency, etc.
+        """
+        self.settings[key] = value
+        self._save_settings()
+        print(f"Setting saved: {key} = {value}")
 
 
     # ============================================================

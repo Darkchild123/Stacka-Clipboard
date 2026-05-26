@@ -247,15 +247,22 @@ class ProfileManager:
             with open(PROFILES_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.profiles  = data.get("profiles", self._default_profiles())
-
-            # Always start on General when the app launches.
-            # This prevents the app opening on a named profile that looks
-            # empty — the user can switch to any profile once the app is open.
-            self.active_id = GENERAL_ID
+            saved_id       = data.get("active_id", GENERAL_ID)
 
             # Always ensure General exists as the first entry
             if not any(p["id"] == GENERAL_ID for p in self.profiles):
                 self.profiles.insert(0, self._general_profile())
+
+            # Restore the last active profile only if it still has items.
+            # If it is empty (or no longer exists), fall back to General so
+            # the user doesn't open the app to a blank history.
+            saved_profile = self._find(saved_id)
+            if (saved_id == GENERAL_ID or
+                    (saved_profile and saved_profile.get("item_ids"))):
+                self.active_id = saved_id
+            else:
+                self.active_id = GENERAL_ID
+                print(f"Last profile '{saved_id}' is empty — reverting to General.")
 
         except Exception as e:
             print(f"Failed to load profiles: {e}")

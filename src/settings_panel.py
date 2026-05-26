@@ -18,8 +18,8 @@ APP_VERSION = "1.0.0"
 APP_AUTHOR  = "Cosmas"
 GITHUB_URL  = "https://github.com/Darkchild123/Project-ClipDrop"
 
-# --- Colours (matching the dropdown popup theme) ---
-COLOURS = {
+# --- Colour themes ---
+DARK_COLOURS = {
     "bg":           "#1e1e2e",
     "bg_section":   "#2a2a3e",
     "bg_input":     "#13131f",
@@ -32,6 +32,23 @@ COLOURS = {
     "success":      "#22c55e",
     "border":       "#3f3f5f",
 }
+
+LIGHT_COLOURS = {
+    "bg":           "#f8fafc",
+    "bg_section":   "#f1f5f9",
+    "bg_input":     "#e2e8f0",
+    "accent":       "#4f46e5",
+    "accent_hover": "#6366f1",
+    "text":         "#1e293b",
+    "text_dim":     "#64748b",
+    "danger":       "#ef4444",
+    "danger_hover": "#dc2626",
+    "success":      "#16a34a",
+    "border":       "#cbd5e1",
+}
+
+# Active theme — updated at runtime in show()
+COLOURS = dict(DARK_COLOURS)
 
 # --- Fonts ---
 FONT_TITLE   = ("Segoe UI", 13, "bold")
@@ -60,13 +77,22 @@ class SettingsPanel:
         self.root.resizable(False, False)       # Fixed size — no resizing
         self.root.attributes("-topmost", True)  # Always on top
 
+        # Apply saved theme and transparency
+        theme   = self.history.settings.get("theme", "dark")
+        opacity = self.history.settings.get("transparency", 1.0)
+        COLOURS.update(DARK_COLOURS if theme == "dark" else LIGHT_COLOURS)
+        self.root.configure(bg=COLOURS["bg"])
+        self.root.attributes("-alpha", opacity)
+
         # Set the window size and centre it on screen
         window_width  = 420
-        window_height = 680
+        window_height = 780
         self._centre_window(window_width, window_height)
 
         # Build all sections of the settings panel
         self._build_header()
+        self._build_divider()
+        self._build_appearance_section()
         self._build_divider()
         self._build_history_section()
         self._build_divider()
@@ -103,6 +129,151 @@ class SettingsPanel:
             font=FONT_TITLE,
             pady=16
         ).pack()
+
+
+    def _build_appearance_section(self):
+        """
+        Appearance section — lets the user choose Dark or Light theme
+        and set the popup transparency with a slider.
+        """
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section.pack(fill="x")
+
+        tk.Label(section, text="🎨  Appearance",
+                 bg=COLOURS["bg"], fg=COLOURS["text"],
+                 font=FONT_HEADING, anchor="w").pack(fill="x")
+
+        tk.Label(section, text="Theme and transparency for the clipboard popup.",
+                 bg=COLOURS["bg"], fg=COLOURS["text_dim"],
+                 font=FONT_SMALL, anchor="w").pack(fill="x", pady=(2, 12))
+
+        # --- Theme toggle ---
+        theme_row = tk.Frame(section, bg=COLOURS["bg"])
+        theme_row.pack(fill="x", pady=(0, 12))
+
+        tk.Label(theme_row, text="Theme:",
+                 bg=COLOURS["bg"], fg=COLOURS["text"],
+                 font=FONT_BODY, width=14, anchor="w").pack(side="left")
+
+        current_theme = self.history.settings.get("theme", "dark")
+
+        self._dark_btn  = tk.Label(theme_row, text="🌙  Dark",
+                                   font=FONT_BODY, padx=14, pady=6,
+                                   cursor="hand2", relief="flat")
+        self._light_btn = tk.Label(theme_row, text="☀️  Light",
+                                   font=FONT_BODY, padx=14, pady=6,
+                                   cursor="hand2", relief="flat")
+        self._dark_btn.pack(side="left", padx=(0, 6))
+        self._light_btn.pack(side="left")
+
+        self._refresh_theme_buttons(current_theme)
+
+        self._dark_btn.bind( "<Button-1>", lambda e: self._set_theme("dark"))
+        self._light_btn.bind("<Button-1>", lambda e: self._set_theme("light"))
+
+        # --- Transparency slider ---
+        tk.Label(section, text="Popup transparency:",
+                 bg=COLOURS["bg"], fg=COLOURS["text"],
+                 font=FONT_BODY, anchor="w").pack(fill="x")
+
+        current_opacity = self.history.settings.get("transparency", 1.0)
+
+        slider_row = tk.Frame(section, bg=COLOURS["bg"])
+        slider_row.pack(fill="x", pady=(6, 0))
+
+        self._opacity_var = tk.DoubleVar(value=current_opacity)
+        slider = tk.Scale(
+            slider_row,
+            variable=self._opacity_var,
+            from_=0.4, to=1.0,
+            resolution=0.05,
+            orient="horizontal",
+            length=240,
+            bg=COLOURS["bg"],
+            fg=COLOURS["text"],
+            troughcolor=COLOURS["bg_section"],
+            highlightthickness=0,
+            bd=0,
+            showvalue=False,
+            command=self._on_opacity_change
+        )
+        slider.pack(side="left")
+
+        self._opacity_label = tk.Label(
+            slider_row,
+            text=f"{int(current_opacity * 100)}%",
+            bg=COLOURS["bg"], fg=COLOURS["text_dim"],
+            font=FONT_BODY, width=5
+        )
+        self._opacity_label.pack(side="left", padx=(8, 0))
+
+
+    def _refresh_theme_buttons(self, active_theme):
+        """Highlights the active theme button and dims the inactive one."""
+        if active_theme == "dark":
+            self._dark_btn.configure( bg=COLOURS["accent"],    fg="white")
+            self._light_btn.configure(bg=COLOURS["bg_section"], fg=COLOURS["text_dim"])
+        else:
+            self._dark_btn.configure( bg=COLOURS["bg_section"], fg=COLOURS["text_dim"])
+            self._light_btn.configure(bg=COLOURS["accent"],     fg="white")
+
+
+    def _set_theme(self, theme):
+        """
+        Saves the chosen theme, updates COLOURS, then rebuilds the entire
+        settings UI in-place so the user sees the new theme immediately.
+        """
+        self.history.save_setting("theme", theme)
+        COLOURS.update(DARK_COLOURS if theme == "dark" else LIGHT_COLOURS)
+        self._rebuild_ui()
+
+
+    def _rebuild_ui(self):
+        """
+        Destroys all current widgets and rebuilds the settings UI from scratch
+        using the current COLOURS. Called when the theme changes so colours
+        update in real time without closing the window.
+        """
+        # Remove every widget from the window
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+        # Restore window background and saved transparency
+        self.root.configure(bg=COLOURS["bg"])
+        self.root.attributes("-alpha", self.history.settings.get("transparency", 1.0))
+
+        # Rebuild all sections fresh with the new colours
+        self._build_header()
+        self._build_divider()
+        self._build_appearance_section()
+        self._build_divider()
+        self._build_history_section()
+        self._build_divider()
+        self._build_profiles_section()
+        self._build_divider()
+        self._build_danger_section()
+        self._build_divider()
+        self._build_info_section()
+        self._build_footer()
+
+
+    def _on_opacity_change(self, value):
+        """
+        Called every time the slider moves.
+        Applies transparency to the settings window in real-time so the
+        user can see the effect while dragging, then saves the value.
+        """
+        opacity = round(float(value), 2)
+        # Apply to this window immediately so the user sees it live
+        try:
+            self.root.attributes("-alpha", opacity)
+        except Exception:
+            pass
+        # Update the percentage label
+        if hasattr(self, "_opacity_label"):
+            self._opacity_label.configure(text=f"{int(opacity * 100)}%")
+        # Save to settings
+        self.history.save_setting("transparency", opacity)
 
 
     def _build_history_section(self):
