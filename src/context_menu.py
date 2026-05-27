@@ -148,6 +148,16 @@ class ContextMenu:
         self.overlay.configure(bg=OVERLAY_COLOURS["shadow"])
         self.overlay.withdraw()                 # Hidden until right-click
 
+        # WS_EX_NOACTIVATE — clicking overlay never steals focus
+        try:
+            import win32gui, win32con
+            _oh = self.overlay.winfo_id()
+            _oe = win32gui.GetWindowLong(_oh, win32con.GWL_EXSTYLE)
+            win32gui.SetWindowLong(_oh, win32con.GWL_EXSTYLE,
+                                   _oe | win32con.WS_EX_NOACTIVATE)
+        except Exception:
+            pass
+
         # The clickable button label
         self.overlay_btn = tk.Label(
             self.overlay,
@@ -216,6 +226,12 @@ class ContextMenu:
         so we can retry without freezing tkinter.  Only the final UI update
         is scheduled back onto the main thread.
         """
+        # Snapshot the foreground window RIGHT NOW, before our overlay or
+        # popup steals focus.  This is the app the user wants to paste into.
+        try:
+            self._right_click_target = win32gui.GetForegroundWindow()
+        except Exception:
+            self._right_click_target = None
         if not self._should_show_overlay():
             return
 
@@ -438,6 +454,9 @@ class ContextMenu:
         Hides the overlay and opens the ClipDrop popup.
         """
         self._hide_overlay()
+        # Use the target snapped at right-click time — by now our overlay
+        # has taken focus so GetForegroundWindow() would return us.
+        self.popup._paste_target = getattr(self, "_right_click_target", None)
         x, y = pyautogui.position()
         self.popup.show(x, y)
 
@@ -478,6 +497,11 @@ class ContextMenu:
                     x = int(nums[0])
                     y = int(nums[1])
 
+                    # Snap the foreground window before the popup appears
+                    try:
+                        self.popup._paste_target = win32gui.GetForegroundWindow()
+                    except Exception:
+                        self.popup._paste_target = None
                     self.popup.show(x, y)
                     print(f"Registry trigger received at ({x}, {y})")
 
@@ -695,6 +719,10 @@ class ContextMenu:
 
     def _on_hotkey_triggered(self):
         """Opens the popup at the current cursor position."""
+        try:
+            self.popup._paste_target = win32gui.GetForegroundWindow()
+        except Exception:
+            self.popup._paste_target = None
         x, y = pyautogui.position()
         self.popup.show(x, y)
 

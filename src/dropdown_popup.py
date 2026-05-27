@@ -154,6 +154,14 @@ class DropdownPopup:
         Uses root.after() so it always runs on the main thread,
         even when called from a hotkey or background thread.
         """
+        # Only capture from OS if the caller didn't pre-set the target
+        # (context_menu.py sets it at right-click time for better accuracy).
+        if not getattr(self, "_paste_target", None):
+            try:
+                import win32gui as _wg
+                self._paste_target = _wg.GetForegroundWindow()
+            except Exception:
+                self._paste_target = None
         self.root.after(0, lambda: self._build_and_show(x, y))
 
 
@@ -211,12 +219,24 @@ class DropdownPopup:
         self.window.attributes("-topmost", True)
         self.window.configure(bg=COLOURS["bg"])
 
+        # WS_EX_NOACTIVATE — window receives mouse clicks but NEVER steals
+        # keyboard focus from the app the user wants to paste into.
+        # This is the correct fix: if we never take focus, we never need to
+        # restore it before sending Ctrl+V.
+        try:
+            import win32gui, win32con
+            _hw = self.window.winfo_id()
+            _ex = win32gui.GetWindowLong(_hw, win32con.GWL_EXSTYLE)
+            win32gui.SetWindowLong(_hw, win32con.GWL_EXSTYLE,
+                                   _ex | win32con.WS_EX_NOACTIVATE)
+        except Exception:
+            pass
+
         # Hide until fully built to prevent flicker
         self.window.withdraw()
 
-        # Close when focus is lost
-        self.window.bind("<FocusOut>", self._on_focus_out)
-        self.window.bind("<Escape>",   lambda e: self.hide())
+        # Escape still works via the mouse-hook left-click detection
+        self.window.bind("<Escape>", lambda e: self.hide())
 
         if not items:
             self._build_empty_state()
@@ -231,7 +251,6 @@ class DropdownPopup:
         self.window.attributes("-alpha", 0.0)
         self.window.deiconify()
         self.window.lift()
-        self.window.focus_force()
         self._fade_in()
 
 
@@ -729,9 +748,9 @@ class DropdownPopup:
             _n   = len(_files)
             _pst = {"win": None, "after_id": None}   # per-row panel state
 
-            PANEL_W    = 250
-            ROW_H      = 32
-            MAX_LIST_H = 300
+            PANEL_W    = 340
+            ROW_H      = 40
+            MAX_LIST_H = 420
 
             def _cancel_close(_ps=_pst):
                 if _ps["after_id"]:
@@ -759,6 +778,15 @@ class DropdownPopup:
                 panel.attributes("-topmost", True)
                 panel.configure(bg=COLOURS["border"])
                 _ps["win"] = panel
+                # Non-activating — clicks register without stealing focus
+                try:
+                    import win32gui, win32con
+                    _ph = panel.winfo_id()
+                    _pe = win32gui.GetWindowLong(_ph, win32con.GWL_EXSTYLE)
+                    win32gui.SetWindowLong(_ph, win32con.GWL_EXSTYLE,
+                                           _pe | win32con.WS_EX_NOACTIVATE)
+                except Exception:
+                    pass
 
                 # ── Position ─────────────────────────────────────────────────
                 popup_x = self.window.winfo_x()
@@ -772,7 +800,7 @@ class DropdownPopup:
                     panel_x = popup_x - PANEL_W - 4
 
                 list_h  = min(_n * (ROW_H + 1), MAX_LIST_H)
-                total_h = list_h + 26                   # 26 px header
+                total_h = list_h + 36                   # 36 px header
                 if row_y + total_h > scr_h:
                     row_y = max(0, scr_h - total_h - 8)
 
@@ -780,15 +808,29 @@ class DropdownPopup:
                 inner = tk.Frame(panel, bg=COLOURS["bg_item"])
                 inner.pack(fill="both", expand=True, padx=1, pady=1)
 
-                # Header
-                hdr = tk.Frame(inner, bg=COLOURS["accent"], height=24)
+                # Header — draggable
+                hdr = tk.Frame(inner, bg=COLOURS["accent"], height=36)
                 hdr.pack(fill="x")
                 hdr.pack_propagate(False)
-                tk.Label(
-                    hdr, text=f"  📁  {_n} files",
-                    bg=COLOURS["accent"], fg="white",
-                    font=("Segoe UI", 8, "bold")
-                ).pack(side="left", fill="y", padx=4)
+                hdr_lbl = tk.Label(
+                    hdr, text=f"  📁  {_n} files  ··· drag to move",
+                    bg=COLOURS["accent"], fg="#c7d2fe",
+                    font=("Segoe UI", 8, "bold"),
+                    cursor="fleur"
+                )
+                hdr_lbl.pack(side="left", fill="y", padx=4)
+                hdr.configure(cursor="fleur")
+                _drag = {"x": 0, "y": 0}
+                def _hdr_press(e, _p=panel):
+                    _drag["x"] = e.x_root - _p.winfo_x()
+                    _drag["y"] = e.y_root - _p.winfo_y()
+                    _cancel_close(_ps)
+                def _hdr_move(e, _p=panel):
+                    _cancel_close(_ps)
+                    _p.geometry(f"+{e.x_root - _drag['x']}+{e.y_root - _drag['y']}")
+                for _dw in (hdr, hdr_lbl):
+                    _dw.bind("<ButtonPress-1>", _hdr_press)
+                    _dw.bind("<B1-Motion>",     _hdr_move)
 
                 # Scrollable canvas
                 canvas = tk.Canvas(
@@ -896,9 +938,15 @@ class DropdownPopup:
                         _c.itemconfigure(f"row{_h[0]}", fill=COLOURS["bg_item"])
                     _h[0] = -1
 
-                def _on_click(e, _c=canvas):
+                def _on_click(e, _c=canvas, _ps=_pst):
                     idx = _idx_at(e)
                     if 0 <= idx < _n:
+                        try:
+                            if _ps["win"] and _ps["win"].winfo_exists():
+                                _ps["win"].destroy()
+                        except Exception:
+                            pass
+                        _ps["win"] = None
                         _single            = dict(item)
                         _single["content"] = [_files[idx]]
                         self._paste_item(_single)
@@ -1627,12 +1675,12 @@ class DropdownPopup:
     def _paste_item(self, item):
         """Hides popup, restores item to clipboard, simulates Ctrl+V."""
         self.hide()
-        self.root.after(150, lambda: self._do_paste(item))
+        self.root.after(250, lambda: self._do_paste(item))
 
 
     def _do_paste(self, item):
         """Actually performs the paste operation."""
-        import struct
+        import struct, hashlib
         if self.watcher:
             self.watcher.paused = True
         try:
@@ -1640,6 +1688,10 @@ class DropdownPopup:
             win32clipboard.EmptyClipboard()
             if item["type"] in ("text", "url", "code", "bash"):
                 win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, item["content"])
+                if self.watcher:
+                    self.watcher.last_seen = hashlib.md5(
+                        item["content"].encode("utf-8", errors="ignore")
+                    ).hexdigest()
             elif item["type"] == "file":
                 files = item["content"]
                 if isinstance(files, list):
@@ -1649,6 +1701,10 @@ class DropdownPopup:
                     file_block += b"\x00\x00"
                     header = struct.pack("<5I", 20, 0, 0, 0, 1)
                     win32clipboard.SetClipboardData(win32con.CF_HDROP, header + file_block)
+                    if self.watcher:
+                        self.watcher.last_seen = hashlib.md5(
+                            str(files).encode("utf-8", errors="ignore")
+                        ).hexdigest()
             elif item["type"] == "image":
                 img = Image.open(item["content"])
                 output = io.BytesIO()
@@ -1666,6 +1722,33 @@ class DropdownPopup:
             if self.watcher:
                 self.watcher.paused = False
             return
+        # For most apps: WS_EX_NOACTIVATE kept the original app focused
+        # throughout, so Ctrl+V lands there with no extra work.
+        #
+        # Desktop exception: the registry-trigger path (right-click desktop
+        # → Paste from ClipDrop) spawns a short-lived pythonw.exe that can
+        # shift focus away from the desktop shell before our popup appears.
+        # We fix this ONLY for desktop windows — SetForegroundWindow succeeds
+        # here because the user's click on our popup just gave ClipDrop a
+        # recent input event, which Windows requires before allowing the call.
+        _target = getattr(self, "_paste_target", None)
+        self._paste_target = None
+        if _target:
+            try:
+                import win32gui as _wg
+                _cls = _wg.GetClassName(_target)
+                if _cls in ("Progman", "WorkerW"):
+                    # Resolve top-level desktop window → focusable SysListView32
+                    _sv = _wg.FindWindowEx(_target, None, "SHELLDLL_DefView", None)
+                    if _sv:
+                        _lv = _wg.FindWindowEx(_sv, None, "SysListView32", None)
+                        if _lv:
+                            _target = _lv
+                    _wg.SetForegroundWindow(_target)
+                    _wg.BringWindowToTop(_target)
+                    time.sleep(0.1)
+            except Exception:
+                pass
         pyautogui.hotkey("ctrl", "v")
         if self.watcher:
             time.sleep(0.5)
