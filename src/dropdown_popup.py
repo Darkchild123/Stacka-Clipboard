@@ -26,7 +26,7 @@ DRAG_THRESHOLD = 6   # pixels of movement before drag mode activates
 DARK_COLOURS = {
     "bg":           "#1e1e2e",
     "bg_item":      "#2a2a3e",
-    "bg_hover":     "#3a3a5e",
+    "bg_hover":     "#4c4c8a",
     "bg_pinned":    "#2d3748",
     "accent":       "#4f46e5",
     "accent_light": "#6366f1",
@@ -76,8 +76,44 @@ ITEM_HEIGHT  = 72
 THUMB_SIZE   = 36
 PADDING      = 10
 
+# Maps every known file extension to an icon-type string used by _draw_type_icon.
+# Extensions not listed here fall back to the generic amber "file" icon.
+_FILE_TYPE_MAP = {}
+for _e in ['.png','.jpg','.jpeg','.gif','.bmp','.webp','.ico','.tiff','.tif','.heic','.avif','.svg']:
+    _FILE_TYPE_MAP[_e] = "image"
+for _e in ['.mp4','.mov','.avi','.mkv','.wmv','.flv','.webm','.m4v','.mpg','.mpeg','.3gp','.ts','.vob','.rm','.rmvb']:
+    _FILE_TYPE_MAP[_e] = "video"
+for _e in ['.mp3','.wav','.flac','.aac','.ogg','.m4a','.wma','.opus','.aiff','.alac']:
+    _FILE_TYPE_MAP[_e] = "audio"
+for _e in ['.xlsx','.xls','.xlsm','.xlsb','.ods','.numbers','.csv','.tsv']:
+    _FILE_TYPE_MAP[_e] = "excel"
+for _e in ['.docx','.doc','.odt','.rtf','.pages','.docm']:
+    _FILE_TYPE_MAP[_e] = "word"
+for _e in ['.pptx','.ppt','.odp','.key','.pptm']:
+    _FILE_TYPE_MAP[_e] = "ppt"
+for _e in ['.pdf']:
+    _FILE_TYPE_MAP[_e] = "pdf"
+for _e in ['.exe','.msi','.apk','.dmg','.deb','.rpm','.jar','.appx','.msix']:
+    _FILE_TYPE_MAP[_e] = "exe"
+for _e in ['.zip','.rar','.7z','.tar','.gz','.bz2','.xz','.zst','.cab','.iso']:
+    _FILE_TYPE_MAP[_e] = "zip"
+for _e in ['.html','.htm','.xhtml','.mhtml','.php','.asp','.aspx','.jsp']:
+    _FILE_TYPE_MAP[_e] = "html"
+for _e in ['.py','.js','.ts','.jsx','.tsx','.java','.c','.cpp','.h','.cs',
+           '.go','.rs','.rb','.swift','.kt','.r','.sql','.css','.scss','.less',
+           '.vue','.svelte','.lua','.bat','.cmd','.sh','.bash','.ps1','.vbs']:
+    _FILE_TYPE_MAP[_e] = "code"
+for _e in ['.txt','.md','.log','.ini','.cfg','.conf','.json','.xml','.yaml','.yml','.toml']:
+    _FILE_TYPE_MAP[_e] = "text"
+
 
 class DropdownPopup:
+
+    # Shared PIL-image cache for type icons.
+    # Key: (icon_type, size)  →  Value: PIL Image (read-only after drawing).
+    # Eliminates redundant re-drawing when many files share the same type,
+    # e.g. 100 .jpg files all need the same 20-px "image" icon.
+    _icon_cache: dict = {}
 
     def __init__(self, root, history_manager, watcher=None, profile_manager=None):
         """
@@ -378,6 +414,8 @@ class DropdownPopup:
             width=POPUP_WIDTH, height=content_height,
             highlightthickness=0
         )
+        # Store ref so _build_item_row can update scrollregion after expand/collapse
+        self._scroll_canvas = canvas
 
         scrollbar = tk.Scrollbar(inner, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -477,6 +515,21 @@ class DropdownPopup:
         g = int(g1 + (g2 - g1) * t)
         b = int(b1 + (b2 - b1) * t)
         return f"#{r:02x}{g:02x}{b:02x}"
+
+
+    def _update_scroll(self):
+        """
+        Recalculates the scrollable canvas region.
+        Called every animation frame during expand/collapse so the scrollable
+        area always matches the actual (partially-animated) content height.
+        """
+        try:
+            if hasattr(self, "_scroll_canvas") and self._scroll_canvas.winfo_exists():
+                self._scroll_canvas.configure(
+                    scrollregion=self._scroll_canvas.bbox("all")
+                )
+        except Exception:
+            pass
 
 
     def _build_item_row(self, parent, item, index):
@@ -609,13 +662,13 @@ class DropdownPopup:
                     child.configure(bg=new_bg)
                 except Exception:
                     pass
-            # Left type-strip grows 3 px → 5 px
+            # Left type-strip grows 3 px → 10 px — much more visible than before
             try:
-                strip.configure(width=max(3, int(3 + 2 * t)))
+                strip.configure(width=max(3, int(3 + 7 * t)))
             except Exception:
                 pass
-            # Bottom separator glows from border colour → type colour (capped at 70 %)
-            sep_col = DropdownPopup._hex_lerp(COLOURS["border"], type_strip_colour, t * 0.7)
+            # Bottom separator glows from border colour → full type colour
+            sep_col = DropdownPopup._hex_lerp(COLOURS["border"], type_strip_colour, t)
             try:
                 sep.configure(bg=sep_col)
             except Exception:
@@ -638,7 +691,7 @@ class DropdownPopup:
                 _anim["t"] = target_t
                 _apply_state(target_t)
                 return
-            _anim["t"] += diff * 0.32  # Ease-out: cover 32 % of remaining gap per frame
+            _anim["t"] += diff * 0.45  # Ease-out: cover 45 % of remaining gap per frame
             _apply_state(_anim["t"])
             self.root.after(16, lambda: _step(target_t, seq))
 
@@ -656,6 +709,331 @@ class DropdownPopup:
         for _w in [row, thumb_frame, text_frame, preview_label, source_label]:
             _w.bind("<Enter>", _enter)
             _w.bind("<Leave>", _leave)
+
+        # ── Multi-file side panel ────────────────────────────────────────────
+        # When the item holds 2+ files, hovering the row opens a floating side
+        # panel to the right of the popup.  It lists every file in a compact
+        # 32 px format with its own scrollbar.  The panel stays open as long as
+        # the mouse is anywhere over the row OR the panel itself; it auto-closes
+        # 250 ms after the mouse leaves both.
+        # Left-click any file → pastes just that one file.
+        # Right-click any file → Send-to-profile menu for the whole item.
+        _files    = item.get("content", [])
+        _is_multi = (
+            item["type"] == "file"
+            and isinstance(_files, list)
+            and len(_files) > 1
+        )
+
+        if _is_multi:
+            _n   = len(_files)
+            _pst = {"win": None, "after_id": None}   # per-row panel state
+
+            PANEL_W    = 250
+            ROW_H      = 32
+            MAX_LIST_H = 300
+
+            def _cancel_close(_ps=_pst):
+                if _ps["after_id"]:
+                    self.root.after_cancel(_ps["after_id"])
+                    _ps["after_id"] = None
+
+            def _schedule_close(_ps=_pst):
+                _cancel_close(_ps)
+                def _do_close(_ps=_ps):
+                    if _ps["win"] and _ps["win"].winfo_exists():
+                        _ps["win"].destroy()
+                    _ps["win"] = None
+                    _ps["after_id"] = None
+                _ps["after_id"] = self.root.after(250, _do_close)
+
+            def _open_panel(_ps=_pst):
+                _cancel_close(_ps)
+                if _ps["win"] and _ps["win"].winfo_exists():
+                    return   # already open
+                if not (self.window and self.window.winfo_exists()):
+                    return
+
+                panel = tk.Toplevel(self.root)
+                panel.overrideredirect(True)
+                panel.attributes("-topmost", True)
+                panel.configure(bg=COLOURS["border"])
+                _ps["win"] = panel
+
+                # ── Position ─────────────────────────────────────────────────
+                popup_x = self.window.winfo_x()
+                row_y   = row.winfo_rooty()
+                panel_x = popup_x + POPUP_WIDTH + 4   # right of the main popup
+
+                scr_w = self.window.winfo_screenwidth()
+                scr_h = self.window.winfo_screenheight()
+
+                if panel_x + PANEL_W > scr_w:          # flip left if near edge
+                    panel_x = popup_x - PANEL_W - 4
+
+                list_h  = min(_n * (ROW_H + 1), MAX_LIST_H)
+                total_h = list_h + 26                   # 26 px header
+                if row_y + total_h > scr_h:
+                    row_y = max(0, scr_h - total_h - 8)
+
+                # ── Content ───────────────────────────────────────────────────
+                inner = tk.Frame(panel, bg=COLOURS["bg_item"])
+                inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+                # Header
+                hdr = tk.Frame(inner, bg=COLOURS["accent"], height=24)
+                hdr.pack(fill="x")
+                hdr.pack_propagate(False)
+                tk.Label(
+                    hdr, text=f"  📁  {_n} files",
+                    bg=COLOURS["accent"], fg="white",
+                    font=("Segoe UI", 8, "bold")
+                ).pack(side="left", fill="y", padx=4)
+
+                # Scrollable canvas
+                canvas = tk.Canvas(
+                    inner, bg=COLOURS["bg_item"],
+                    width=PANEL_W - 2, height=list_h,
+                    highlightthickness=0
+                )
+                if _n * (ROW_H + 1) > MAX_LIST_H:
+                    sb = tk.Scrollbar(inner, orient="vertical", command=canvas.yview)
+                    canvas.configure(yscrollcommand=sb.set)
+                    sb.pack(side="right", fill="y")
+
+                canvas.pack(side="left", fill="both", expand=True)
+
+                # ── Draw all rows as canvas items ────────────────────────────
+                # Canvas items (rectangles + text) are raw drawing primitives.
+                # They have no geometry manager and cost ~20× less to create
+                # than equivalent tk.Frame/tk.Label widgets.  For 247 files
+                # this turns ~1 200 widget-creation calls into a single fast
+                # drawing pass with no batching needed.
+                LIST_W  = PANEL_W - 2
+                STRIP_W = 3
+                BADGE_W = 36          # badge rectangle width
+                BADGE_X = LIST_W - 6  # badge right edge x
+                TEXT_X  = STRIP_W + 10  # filename left edge x
+
+                for _i, _fp in enumerate(_files):
+                    _y0 = _i * (ROW_H + 1)
+                    _y1 = _y0 + ROW_H
+                    _cy = (_y0 + _y1) // 2
+
+                    # Row background
+                    canvas.create_rectangle(
+                        0, _y0, LIST_W, _y1,
+                        fill=COLOURS["bg_item"], outline="",
+                        tags=(f"row{_i}", "allrows")
+                    )
+                    # Left colour strip
+                    _is_dir   = os.path.isdir(_fp)
+                    _scol     = TYPE_COLOURS.get(
+                        "folder" if _is_dir else "file", COLOURS["accent"]
+                    )
+                    canvas.create_rectangle(
+                        0, _y0, STRIP_W, _y1,
+                        fill=_scol, outline="",
+                        tags=(f"strip{_i}",)
+                    )
+                    # Extension badge background
+                    _bx1 = BADGE_X - BADGE_W
+                    canvas.create_rectangle(
+                        _bx1, _y0 + 8, BADGE_X, _y1 - 8,
+                        fill=COLOURS["accent"], outline="",
+                        tags=(f"badge{_i}",)
+                    )
+                    # Extension badge text
+                    _raw   = "" if _is_dir else os.path.splitext(_fp)[1]
+                    _ext_t = "dir" if _is_dir else (_raw[1:].lower() if _raw else "file")
+                    canvas.create_text(
+                        (_bx1 + BADGE_X) // 2, _cy,
+                        text=_ext_t, fill="white",
+                        font=("Segoe UI", 7, "bold"),
+                        tags=(f"btxt{_i}",)
+                    )
+                    # Filename — width= clips text before it hits the badge
+                    canvas.create_text(
+                        TEXT_X, _cy,
+                        text=os.path.basename(_fp),
+                        fill=COLOURS["text"],
+                        font=("Segoe UI", 8),
+                        anchor="w",
+                        width=_bx1 - TEXT_X - 4,
+                        tags=(f"name{_i}", "allnames")
+                    )
+                    # Row separator line
+                    canvas.create_line(
+                        0, _y1, LIST_W, _y1,
+                        fill=COLOURS["border"],
+                        tags=(f"sep{_i}",)
+                    )
+
+                # Set scroll region to full content height
+                canvas.configure(
+                    scrollregion=(0, 0, LIST_W, len(_files) * (ROW_H + 1))
+                )
+
+                # ── Single-binding hover + click (no per-row bindings) ───────
+                _hov_idx = [-1]   # mutable so closures can update it
+
+                def _idx_at(e, _c=canvas):
+                    """Convert mouse y to file index, accounting for scroll."""
+                    return int(_c.canvasy(e.y) // (ROW_H + 1))
+
+                def _on_motion(e, _c=canvas, _h=_hov_idx):
+                    idx = _idx_at(e)
+                    if idx == _h[0]:
+                        return
+                    if 0 <= _h[0] < _n:
+                        _c.itemconfigure(f"row{_h[0]}", fill=COLOURS["bg_item"])
+                    _h[0] = idx
+                    if 0 <= idx < _n:
+                        _c.itemconfigure(f"row{idx}", fill=COLOURS["bg_hover"])
+
+                def _on_leave(e, _c=canvas, _h=_hov_idx):
+                    if 0 <= _h[0] < _n:
+                        _c.itemconfigure(f"row{_h[0]}", fill=COLOURS["bg_item"])
+                    _h[0] = -1
+
+                def _on_click(e, _c=canvas):
+                    idx = _idx_at(e)
+                    if 0 <= idx < _n:
+                        _single            = dict(item)
+                        _single["content"] = [_files[idx]]
+                        self._paste_item(_single)
+
+                canvas.bind("<Motion>",   _on_motion)
+                canvas.bind("<Leave>",    _on_leave)
+                canvas.bind("<Button-1>", _on_click)
+                canvas.bind("<MouseWheel>",
+                            lambda e, c=canvas: c.yview_scroll(
+                                int(-1 * (e.delta / 120)), "units"))
+                if self.profiles:
+                    def _on_panel_rclick(e, _cc=_cancel_close):
+                        # Cancel any pending close BEFORE the menu opens,
+                        # because tk_popup causes a <Leave> on the canvas
+                        # which would schedule a 250 ms close — making the
+                        # panel and menu both disappear shortly after.
+                        _cc()
+                        self._show_send_to_menu(e, item)
+                        # Cancel again 60 ms later in case <Leave> fires
+                        # asynchronously after tk_popup returns.
+                        self.root.after(60, _cc)
+                    canvas.bind("<Button-3>", _on_panel_rclick)
+
+                # Keep panel alive while mouse is inside
+                panel.bind("<Enter>", lambda e: _cancel_close())
+                panel.bind("<Leave>", lambda e: _schedule_close())
+
+                panel.update_idletasks()
+                panel.geometry(f"+{panel_x}+{row_y}")
+                panel.deiconify()
+
+            # Add panel open/close onto the existing hover bindings
+            def _row_enter(e): _open_panel()
+            def _row_leave(e): _schedule_close()
+
+            for _w in [row, thumb_frame, text_frame, preview_label, source_label]:
+                _w.bind("<Enter>", _row_enter, add="+")
+                _w.bind("<Leave>", _row_leave, add="+")
+
+
+    def _build_file_panel_row(self, parent, filepath, parent_item, row_w, row_h=32):
+        """
+        Builds one compact icon-free row inside the multi-file side panel.
+
+        No PIL/ImageTk work at all — just plain tk widgets — so 247 rows
+        build in a fraction of the time that icons would require.
+
+        Layout (left → right, 32 px tall):
+          3 px colour strip | 8 px gap | filename (expands) | ext badge |
+
+        Badge text = raw file extension in lowercase ("jpg", "py", "pdf", …).
+        Folders have no extension so they show "dir".
+        Files with no extension show "file".
+
+        Left-click  → paste just this one file.
+        Right-click → Send-to-profile menu for the parent multi-file item.
+        """
+        is_dir = os.path.isdir(filepath)
+        if is_dir:
+            ext_text  = "dir"
+            strip_col = TYPE_COLOURS.get("folder", COLOURS["accent"])
+        else:
+            raw_ext   = os.path.splitext(filepath)[1]          # e.g. ".jpg"
+            ext_text  = raw_ext[1:].lower() if raw_ext else "file"
+            strip_col = TYPE_COLOURS.get("file", COLOURS["accent"])
+
+        row_bg = COLOURS["bg_item"]
+        prow   = tk.Frame(parent, bg=row_bg, height=row_h, width=row_w)
+        prow.pack(fill="x")
+        prow.pack_propagate(False)
+
+        # Left colour strip — 3 px at rest, 5 px on hover
+        strip = tk.Frame(prow, bg=strip_col, width=3)
+        strip.pack(side="left", fill="y")
+        strip.pack_propagate(False)
+
+        tk.Frame(prow, bg=row_bg, width=8).pack(side="left", fill="y")   # indent gap
+
+        # Extension badge — packed RIGHT before the filename so it reserves space
+        badge = tk.Label(
+            prow, text=ext_text,
+            bg=COLOURS["accent"], fg="white",
+            font=("Segoe UI", 7, "bold"),
+            padx=5, pady=0, width=4, anchor="center"
+        )
+        badge.pack(side="right", padx=(0, 6))
+
+        # Filename — fills whatever is left
+        fname    = os.path.basename(filepath)
+        name_lbl = tk.Label(
+            prow, text=fname,
+            bg=row_bg, fg=COLOURS["text"],
+            font=("Segoe UI", 8), anchor="w",
+            wraplength=row_w - 75, justify="left"
+        )
+        name_lbl.pack(side="left", fill="x", expand=True)
+
+        # Thin separator
+        tk.Frame(parent, bg=COLOURS["border"], height=1).pack(fill="x")
+
+        # Hover — instant colour swap + strip widen (no animation, keeps it fast)
+        _hov = [prow, name_lbl]
+
+        def _in(e):
+            for w in _hov:
+                try: w.configure(bg=COLOURS["bg_hover"])
+                except Exception: pass
+            try: strip.configure(width=5)
+            except Exception: pass
+
+        def _out(e):
+            for w in _hov:
+                try: w.configure(bg=row_bg)
+                except Exception: pass
+            try: strip.configure(width=3)
+            except Exception: pass
+
+        for w in _hov:
+            w.bind("<Enter>", _in)
+            w.bind("<Leave>", _out)
+
+        # Left-click → paste this file only
+        def _paste_one(e=None, fp=filepath):
+            single            = dict(parent_item)
+            single["content"] = [fp]
+            self._paste_item(single)
+
+        for w in _hov:
+            w.bind("<Button-1>", _paste_one)
+
+        # Right-click → Send-to-profile menu for the parent item
+        if self.profiles:
+            for w in _hov:
+                w.bind("<Button-3>",
+                       lambda e, i=parent_item: self._show_send_to_menu(e, i))
 
 
     def _show_profile_menu(self, anchor_widget):
@@ -784,7 +1162,17 @@ class DropdownPopup:
 
 
     def _build_thumbnail(self, parent, item, bg):
-        """Shows image thumbnail or a colorful PIL-drawn type icon."""
+        """
+        Shows a thumbnail or type icon for the clipboard item.
+
+        Priority order:
+          1. Image data item     → real PIL thumbnail
+          2. Folder(s)           → folder icon
+          3. Image file(s)       → real PIL thumbnail (single) or image icon
+          4. Any known extension → specific icon (video/audio/excel/word/…)
+          5. Unknown extension   → generic amber file icon
+        """
+        # ── Copied image data (not a file path) ────────────────────────────
         if item["type"] == "image":
             try:
                 img = Image.open(item["content"])
@@ -794,15 +1182,32 @@ class DropdownPopup:
                 tk.Label(parent, image=photo, bg=bg).pack(expand=True)
                 return
             except Exception:
-                pass
+                pass  # fall through to generic image icon
 
-        # Determine icon type — detect folder vs file from path
-        icon_type = item["type"]
+        icon_type = item["type"]   # default: "text", "url", "code", "bash", "image"
+
+        # ── Copied file(s) ──────────────────────────────────────────────────
         if icon_type == "file":
             files = item.get("content", [])
-            if isinstance(files, list) and files and all(
-                    os.path.isdir(f) for f in files):
-                icon_type = "folder"
+            if isinstance(files, list) and files:
+                if all(os.path.isdir(f) for f in files):
+                    icon_type = "folder"
+                else:
+                    # Classify by the extension of the first file
+                    ext = os.path.splitext(files[0])[1].lower()
+                    icon_type = _FILE_TYPE_MAP.get(ext, "file")
+
+                    # Single image file → show a real thumbnail
+                    if icon_type == "image" and len(files) == 1:
+                        try:
+                            img = Image.open(files[0])
+                            img.thumbnail((THUMB_SIZE, THUMB_SIZE))
+                            photo = ImageTk.PhotoImage(img)
+                            self.thumbnails.append(photo)
+                            tk.Label(parent, image=photo, bg=bg).pack(expand=True)
+                            return
+                        except Exception:
+                            pass  # fall through to image icon
 
         icon_img = self._draw_type_icon(icon_type, THUMB_SIZE)
         photo = ImageTk.PhotoImage(icon_img)
@@ -819,7 +1224,14 @@ class DropdownPopup:
         file   → amber file with folded corner
         folder → yellow Windows-style folder
         image  → teal frame with mountain scene (fallback)
+
+        Results are cached by (icon_type, size) on the class so that building
+        a panel with 100 files of the same type only draws once.
         """
+        _key = (icon_type, size)
+        if _key in DropdownPopup._icon_cache:
+            return DropdownPopup._icon_cache[_key]
+
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         d   = ImageDraw.Draw(img)
 
@@ -837,7 +1249,21 @@ class DropdownPopup:
                 d.rectangle([6, y, end_x, y + 2], fill=line_color)
 
         elif icon_type == "url":
-            # Sky-blue globe with equator, meridian, and oval arc
+            # Chain-link icon — two interlocking horizontal pill/capsule rings.
+            # Lower-right ring drawn first (behind); upper-left ring drawn second (in front).
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=6, fill="#0ea5e9")
+            lw = 3   # ring wall thickness
+            # Lower-right link (behind)
+            d.rounded_rectangle([13, 15, size - 2, size - 5], radius=5, fill="white")
+            d.rounded_rectangle([13 + lw, 15 + lw, size - 2 - lw, size - 5 - lw],
+                                 radius=3, fill="#0ea5e9")
+            # Upper-left link (in front — drawn on top, so it overlaps in the middle)
+            d.rounded_rectangle([2, 5, 22, 19], radius=5, fill="white")
+            d.rounded_rectangle([2 + lw, 5 + lw, 22 - lw, 19 - lw],
+                                 radius=3, fill="#0ea5e9")
+
+        elif icon_type == "html":
+            # Globe — web-page / HTML file icon (same globe used by URL before)
             cx, cy = size // 2, size // 2
             r = size // 2 - 2
             d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#0ea5e9")
@@ -847,22 +1273,140 @@ class DropdownPopup:
             rh = r // 2
             d.arc([cx - rh, cy - r, cx + rh, cy + r], 0, 360, fill="#bae6fd", width=1)
 
+        elif icon_type == "video":
+            # Dark indigo background + red circle + white play triangle ►
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#1e1b4b")
+            cx, cy = size // 2, size // 2
+            r = size // 2 - 5
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#ef4444")
+            tx = cx - r // 3 + 1
+            d.polygon([
+                (tx,         cy - r // 2 - 1),
+                (cx + r // 2 + 2, cy),
+                (tx,         cy + r // 2 + 1),
+            ], fill="white")
+
+        elif icon_type == "audio":
+            # Purple background + eighth-note music symbol
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#7c3aed")
+            hx, hy = size // 2 - 3, size // 2 + 6   # note-head centre
+            # Oval note head
+            d.ellipse([hx - 5, hy - 3, hx + 5, hy + 4], fill="white")
+            # Vertical stem (right side of head, going up)
+            sx = hx + 5
+            d.rectangle([sx - 1, hy - 3 - 12, sx + 1, hy - 3], fill="white")
+            # Flag (two-line curve at stem top)
+            d.line([(sx, hy - 15), (sx + 7, hy - 10), (sx + 5, hy - 5)],
+                   fill="white", width=2)
+
+        elif icon_type == "excel":
+            # Microsoft-Excel green + white spreadsheet grid
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#217346")
+            m = 5   # margin
+            # 4 horizontal lines → 3 rows
+            row_h = (size - 2 * m) // 3
+            for i in range(4):
+                y = m + i * row_h
+                d.rectangle([m, y, size - m, y + 1], fill="white")
+            # 1 vertical divider → 2 columns
+            mid = size // 2
+            d.rectangle([mid, m, mid + 1, size - m], fill="white")
+
+        elif icon_type == "word":
+            # Microsoft-Word blue + white document with text lines
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#2b579a")
+            # Document body
+            d.rounded_rectangle([5, 4, size - 5, size - 4], radius=2, fill="#d6e4f7")
+            # Text lines inside document
+            for yl in [10, 15, 20, 25]:
+                x2 = size - 12 if yl == 20 else size - 8
+                d.rectangle([8, yl, x2, yl + 2], fill="#2b579a")
+
+        elif icon_type == "ppt":
+            # PowerPoint orange-red + slide shape with title bar + speaker stand
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#c43e1c")
+            # Slide white rectangle
+            d.rounded_rectangle([4, 6, size - 4, size - 9], radius=2, fill="white")
+            # Title bar inside slide
+            d.rectangle([7, 9, size - 7, 13], fill="#c43e1c")
+            # Content lines
+            d.rectangle([7, 16, size - 10, 18], fill="#e8a090")
+            d.rectangle([7, 21, size - 13, 23], fill="#e8a090")
+            # Small speaker-stand triangle at bottom
+            cx = size // 2
+            d.polygon([(cx - 3, size - 9), (cx + 3, size - 9), (cx, size - 4)],
+                      fill="white")
+
+        elif icon_type == "pdf":
+            # Red background + amber-tinted document with decreasing content bars
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#cc1c1c")
+            fold = 7
+            # Document body
+            d.polygon([
+                (5, 3), (size - fold - 3, 3),
+                (size - 3, fold + 2), (size - 3, size - 3),
+                (5, size - 3)
+            ], fill="white")
+            # Fold shadow triangle
+            d.polygon([
+                (size - fold - 3, 3), (size - 3, fold + 2),
+                (size - fold - 3, fold + 2)
+            ], fill="#e87070")
+            # Three red content bars (decreasing width — suggests "PDF" content)
+            for i, x2 in enumerate([size - 7, size - 10, size - 14]):
+                d.rectangle([9, 14 + i * 5, x2, 16 + i * 5], fill="#cc1c1c")
+
+        elif icon_type == "exe":
+            # Dark gray background + white gear/cog
+            import math
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#374151")
+            cx, cy = size // 2, size // 2
+            R_outer, R_inner, R_hole = 13, 10, 4
+            # Draw gear as outer circle, then subtract teeth effect with dark dots
+            d.ellipse([cx - R_outer, cy - R_outer, cx + R_outer, cy + R_outer],
+                      fill="white")
+            d.ellipse([cx - R_inner, cy - R_inner, cx + R_inner, cy + R_inner],
+                      fill="#374151")
+            # 8 teeth around the perimeter
+            for deg in range(0, 360, 45):
+                a = math.radians(deg)
+                tx = int(cx + (R_outer - 1) * math.cos(a))
+                ty = int(cy + (R_outer - 1) * math.sin(a))
+                d.ellipse([tx - 3, ty - 3, tx + 3, ty + 3], fill="white")
+            # Re-draw inner ring and hole
+            d.ellipse([cx - R_inner + 1, cy - R_inner + 1,
+                       cx + R_inner - 1, cy + R_inner - 1], fill="white")
+            d.ellipse([cx - R_hole, cy - R_hole, cx + R_hole, cy + R_hole],
+                      fill="#374151")
+
+        elif icon_type == "zip":
+            # Mid-gray background + white box with zipper stripes
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#6b7280")
+            # Box lid
+            d.rounded_rectangle([4, 5, size - 4, 13], radius=2, fill="#d1d5db")
+            # Box body
+            d.rounded_rectangle([4, 12, size - 4, size - 4], radius=2, fill="white")
+            # Zipper strip down the centre of the box
+            cx = size // 2
+            d.rectangle([cx - 2, 5, cx + 2, size - 4], fill="#9ca3af")
+            # Zipper teeth (alternating notches)
+            for zy in range(7, size - 5, 4):
+                d.rectangle([cx - 4, zy, cx - 2, zy + 2], fill="#d1d5db")
+                d.rectangle([cx + 2, zy + 2, cx + 4, zy + 4], fill="#d1d5db")
+
         elif icon_type == "file":
-            # Amber file with folded corner
+            # Amber file with folded corner — no stripes (stripes = text only)
             fold = 9
             d.polygon([
                 (4, 2), (size - fold - 2, 2),
                 (size - 3, fold + 1), (size - 3, size - 2),
                 (4, size - 2)
             ], fill="#f59e0b")
-            # Fold shadow
+            # Fold shadow triangle
             d.polygon([
                 (size - fold - 2, 2), (size - 3, fold + 1),
                 (size - fold - 2, fold + 1)
             ], fill="#b45309")
-            # Content lines
-            for y in [14, 19, 24]:
-                d.rectangle([8, y, size - 7, y + 2], fill="#fef3c7")
 
         elif icon_type == "folder":
             # Yellow Windows-style folder
@@ -885,31 +1429,122 @@ class DropdownPopup:
             d.line([cx + 14, cy,    cx + 9, cy + 5], fill="white", width=2)
 
         elif icon_type == "bash":
-            # Terminal window — dark body with title bar and >_ prompt
-            # Window body (near-black)
             d.rounded_rectangle([1, 1, size - 1, size - 1], radius=4, fill="#0d1117")
-            # Title bar (dark grey strip at top)
             d.rounded_rectangle([1, 1, size - 1, 9], radius=4, fill="#161b22")
-            # Three window-control dots in the title bar
-            d.ellipse([ 4, 3,  8, 7], fill="#ff5f56")   # red   (close)
-            d.ellipse([10, 3, 14, 7], fill="#febc2e")   # yellow (minimise)
-            d.ellipse([16, 3, 20, 7], fill="#28c840")   # green  (maximise)
-            # Prompt:  >  _
+            d.ellipse([ 4, 3,  8, 7], fill="#ff5f56")
+            d.ellipse([10, 3, 14, 7], fill="#febc2e")
+            d.ellipse([16, 3, 20, 7], fill="#28c840")
             cx = 6
             cy = size // 2 + 4
-            # ">" chevron
             d.line([cx,     cy - 4, cx + 5, cy    ], fill="#4ade80", width=2)
             d.line([cx + 5, cy,     cx,     cy + 4], fill="#4ade80", width=2)
-            # "_" blinking cursor block (slightly offset right of the chevron)
             d.rectangle([cx + 8, cy + 2, cx + 18, cy + 4], fill="#4ade80")
+
+        elif icon_type == "url":
+            # Chain-link: two interlocking pill rings (lower-right behind, upper-left in front)
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=6, fill="#0ea5e9")
+            lw = 3
+            d.rounded_rectangle([13, 15, size - 2, size - 5], radius=5, fill="white")
+            d.rounded_rectangle([13 + lw, 15 + lw, size - 2 - lw, size - 5 - lw], radius=3, fill="#0ea5e9")
+            d.rounded_rectangle([2, 5, 22, 19], radius=5, fill="white")
+            d.rounded_rectangle([2 + lw, 5 + lw, 22 - lw, 19 - lw], radius=3, fill="#0ea5e9")
+
+        elif icon_type == "html":
+            cx, cy = size // 2, size // 2
+            r = size // 2 - 2
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#0ea5e9")
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], outline="#bae6fd", width=1)
+            d.line([cx - r, cy, cx + r, cy], fill="#bae6fd", width=1)
+            d.line([cx, cy - r, cx, cy + r], fill="#bae6fd", width=1)
+            rh = r // 2
+            d.arc([cx - rh, cy - r, cx + rh, cy + r], 0, 360, fill="#bae6fd", width=1)
+
+        elif icon_type == "video":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#1e1b4b")
+            cx, cy = size // 2, size // 2
+            r = size // 2 - 5
+            d.ellipse([cx - r, cy - r, cx + r, cy + r], fill="#ef4444")
+            tx = cx - r // 3 + 1
+            d.polygon([(tx, cy - r // 2 - 1), (cx + r // 2 + 2, cy), (tx, cy + r // 2 + 1)], fill="white")
+
+        elif icon_type == "audio":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#7c3aed")
+            hx, hy = size // 2 - 3, size // 2 + 6
+            d.ellipse([hx - 5, hy - 3, hx + 5, hy + 4], fill="white")
+            sx = hx + 5
+            d.rectangle([sx - 1, hy - 3 - 12, sx + 1, hy - 3], fill="white")
+            d.line([(sx, hy - 15), (sx + 7, hy - 10), (sx + 5, hy - 5)], fill="white", width=2)
+
+        elif icon_type == "excel":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#217346")
+            m = 5
+            row_h = (size - 2 * m) // 3
+            for i in range(4):
+                y = m + i * row_h
+                d.rectangle([m, y, size - m, y + 1], fill="white")
+            mid = size // 2
+            d.rectangle([mid, m, mid + 1, size - m], fill="white")
+
+        elif icon_type == "word":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#2b579a")
+            d.rounded_rectangle([5, 4, size - 5, size - 4], radius=2, fill="#d6e4f7")
+            for yl in [10, 15, 20, 25]:
+                x2 = size - 12 if yl == 20 else size - 8
+                d.rectangle([8, yl, x2, yl + 2], fill="#2b579a")
+
+        elif icon_type == "ppt":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#c43e1c")
+            d.rounded_rectangle([4, 6, size - 4, size - 9], radius=2, fill="white")
+            d.rectangle([7, 9, size - 7, 13], fill="#c43e1c")
+            d.rectangle([7, 16, size - 10, 18], fill="#e8a090")
+            d.rectangle([7, 21, size - 13, 23], fill="#e8a090")
+            cx = size // 2
+            d.polygon([(cx - 3, size - 9), (cx + 3, size - 9), (cx, size - 4)], fill="white")
+
+        elif icon_type == "pdf":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#cc1c1c")
+            fold = 7
+            d.polygon([
+                (5, 3), (size - fold - 3, 3),
+                (size - 3, fold + 2), (size - 3, size - 3),
+                (5, size - 3)
+            ], fill="white")
+            d.polygon([(size - fold - 3, 3), (size - 3, fold + 2), (size - fold - 3, fold + 2)], fill="#e87070")
+            for i, x2 in enumerate([size - 7, size - 10, size - 14]):
+                d.rectangle([9, 14 + i * 5, x2, 16 + i * 5], fill="#cc1c1c")
+
+        elif icon_type == "exe":
+            import math as _math
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#374151")
+            cx, cy = size // 2, size // 2
+            R_outer, R_inner, R_hole = 13, 10, 4
+            d.ellipse([cx - R_outer, cy - R_outer, cx + R_outer, cy + R_outer], fill="white")
+            d.ellipse([cx - R_inner, cy - R_inner, cx + R_inner, cy + R_inner], fill="#374151")
+            for deg in range(0, 360, 45):
+                a = _math.radians(deg)
+                tx = int(cx + (R_outer - 1) * _math.cos(a))
+                ty = int(cy + (R_outer - 1) * _math.sin(a))
+                d.ellipse([tx - 3, ty - 3, tx + 3, ty + 3], fill="white")
+            d.ellipse([cx - R_inner + 1, cy - R_inner + 1, cx + R_inner - 1, cy + R_inner - 1], fill="white")
+            d.ellipse([cx - R_hole, cy - R_hole, cx + R_hole, cy + R_hole], fill="#374151")
+
+        elif icon_type == "zip":
+            d.rounded_rectangle([1, 1, size - 1, size - 1], radius=5, fill="#6b7280")
+            d.rounded_rectangle([4, 5, size - 4, 13], radius=2, fill="#d1d5db")
+            d.rounded_rectangle([4, 12, size - 4, size - 4], radius=2, fill="white")
+            cx = size // 2
+            d.rectangle([cx - 2, 5, cx + 2, size - 4], fill="#9ca3af")
+            for zy in range(7, size - 5, 4):
+                d.rectangle([cx - 4, zy, cx - 2, zy + 2], fill="#d1d5db")
+                d.rectangle([cx + 2, zy + 2, cx + 4, zy + 4], fill="#d1d5db")
 
         else:
             # Fallback: teal image/unknown icon
             d.rounded_rectangle([2, 2, size - 2, size - 2], radius=4, fill="#0891b2")
             d.ellipse([7, 6, 14, 13], fill="#fef9c3")
-            d.polygon([(4, size - 6), (size // 2, 14), (size - 4, size - 6)],
-                      fill="#164e63")
+            d.polygon([(4, size - 6), (size // 2, 14), (size - 4, size - 6)], fill="#164e63")
 
+        DropdownPopup._icon_cache[_key] = img
         return img
 
 
@@ -922,8 +1557,6 @@ class DropdownPopup:
             padx=4, pady=2, cursor="hand2"
         )
         btn.pack(side="top", pady=1)
-        # Return "break" so the click does not propagate up to the item row
-        # (which would accidentally trigger a paste alongside the button action)
         btn.bind("<Button-1>", lambda e, c=command: (c(), "break")[1])
         btn.bind("<Enter>", lambda e: btn.configure(bg=COLOURS["bg_hover"]))
         btn.bind("<Leave>", lambda e: btn.configure(bg=COLOURS["bg_item"]))
@@ -942,72 +1575,40 @@ class DropdownPopup:
 
 
     def _on_item_drag(self, event, item):
-        """
-        Called while the mouse moves with button held.
-        Once the cursor travels more than DRAG_THRESHOLD pixels, drag mode
-        activates and a ghost preview window follows the cursor.
-        """
         if not self._is_dragging:
             dx = abs(event.x_root - self._drag_start_x)
             dy = abs(event.y_root - self._drag_start_y)
             if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
                 self._is_dragging = True
                 self._drag_ghost  = self._create_drag_ghost(item)
-
         if self._is_dragging and self._drag_ghost:
-            # Ghost follows cursor with a small offset so the cursor stays visible
-            self._drag_ghost.geometry(
-                f"+{event.x_root + 14}+{event.y_root + 14}"
-            )
+            self._drag_ghost.geometry(f"+{event.x_root + 14}+{event.y_root + 14}")
 
 
     def _on_item_release(self, event, item):
-        """
-        Mouse button released.
-        Short movement = click → paste into currently active window.
-        Long movement  = drag → drop at the release position.
-        """
         if self._is_dragging:
             drop_x, drop_y = event.x_root, event.y_root
-
             if self._drag_ghost:
                 self._drag_ghost.destroy()
                 self._drag_ghost = None
             self._is_dragging = False
             self._drag_item   = None
-
-            # Hide the popup first, then perform the drop after a short delay
-            # so the popup is fully gone before we click the target
             self.hide()
             self.root.after(150, lambda: self._do_drop(item, drop_x, drop_y))
         else:
-            # Simple click — paste into the currently focused app
             self._paste_item(item)
 
 
     def _create_drag_ghost(self, item):
-        """
-        Creates a small semi-transparent preview window that follows the
-        cursor while the user is dragging an item.
-        """
         ghost = tk.Toplevel(self.root)
         ghost.overrideredirect(True)
         ghost.attributes("-topmost", True)
         ghost.attributes("-alpha", 0.85)
         ghost.configure(bg=COLOURS["accent"])
-
-        icon    = "📄" if item["type"] == "text" else (
-                  "🖼️" if item["type"] == "image" else "📁")
+        icon    = "📄" if item["type"] == "text" else ("🖼️" if item["type"] == "image" else "📁")
         preview = self.history.get_preview(item)
-
-        tk.Label(
-            ghost,
-            text=f"{icon}  {preview[:40]}",
-            bg=COLOURS["accent"], fg="white",
-            font=("Segoe UI", 9, "bold"),
-            padx=10, pady=5
-        ).pack()
-
+        tk.Label(ghost, text=f"{icon}  {preview[:40]}", bg=COLOURS["accent"], fg="white",
+                 font=("Segoe UI", 9, "bold"), padx=10, pady=5).pack()
         x, y = pyautogui.position()
         ghost.geometry(f"+{x + 14}+{y + 14}")
         ghost.deiconify()
@@ -1015,24 +1616,11 @@ class DropdownPopup:
 
 
     def _do_drop(self, item, x, y):
-        """
-        Performs the drop at screen position (x, y).
-
-        Clicks at the drop point to:
-          - Focus the target window
-          - Place the text cursor at that exact position (for text editors/fields)
-
-        Then puts the item in the clipboard and simulates Ctrl+V to paste.
-        This gives the user drag-to-drop behaviour using the same reliable
-        clipboard + paste mechanism as a normal ClipDrop paste.
-        """
         try:
             pyautogui.click(x, y)
             time.sleep(0.1)
         except Exception as e:
             print(f"Drop click error: {e}")
-
-        # Reuse the existing paste logic — handles text, files, and images
         self._do_paste(item)
 
 
@@ -1045,48 +1633,22 @@ class DropdownPopup:
     def _do_paste(self, item):
         """Actually performs the paste operation."""
         import struct
-
-        # Pause the clipboard watcher so it doesn't record
-        # the clipboard change we're about to make as a new copy
         if self.watcher:
             self.watcher.paused = True
-
         try:
             win32clipboard.OpenClipboard()
             win32clipboard.EmptyClipboard()
-
             if item["type"] in ("text", "url", "code", "bash"):
-                # URLs, code snippets, and shell commands are all plain strings —
-                # paste them exactly like regular text.
-                win32clipboard.SetClipboardData(
-                    win32con.CF_UNICODETEXT, item["content"])
-
+                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, item["content"])
             elif item["type"] == "file":
-                # Windows CF_HDROP requires a precise binary structure:
-                #
-                # DROPFILES header (exactly 20 bytes):
-                #   pFiles = 20  → offset where file list starts
-                #   pt.x   = 0   → drop point x (unused)
-                #   pt.y   = 0   → drop point y (unused)
-                #   fNC    = 0   → not a non-client point
-                #   fWide  = 1   → file paths are Unicode (UTF-16)
-                #
-                # Followed by each file path as UTF-16-LE + null terminator
-                # Followed by a final double-null to end the list
-
                 files = item["content"]
                 if isinstance(files, list):
                     file_block = b""
                     for f in files:
                         file_block += f.encode("utf-16-le") + b"\x00\x00"
-                    file_block += b"\x00\x00"  # End of list
-
-                    # "<5I" = 5 unsigned ints, little-endian = exactly 20 bytes
+                    file_block += b"\x00\x00"
                     header = struct.pack("<5I", 20, 0, 0, 0, 1)
-                    dropfiles = header + file_block
-
-                    win32clipboard.SetClipboardData(win32con.CF_HDROP, dropfiles)
-
+                    win32clipboard.SetClipboardData(win32con.CF_HDROP, header + file_block)
             elif item["type"] == "image":
                 img = Image.open(item["content"])
                 output = io.BytesIO()
@@ -1094,9 +1656,7 @@ class DropdownPopup:
                 data = output.getvalue()[14:]
                 output.close()
                 win32clipboard.SetClipboardData(win32con.CF_DIB, data)
-
             win32clipboard.CloseClipboard()
-
         except Exception as e:
             print(f"Paste error: {e}")
             try:
@@ -1106,12 +1666,7 @@ class DropdownPopup:
             if self.watcher:
                 self.watcher.paused = False
             return
-
-        # Simulate Ctrl+V to trigger the paste in the active app
         pyautogui.hotkey("ctrl", "v")
-
-        # Resume the clipboard watcher after a short delay
-        # (enough time for the paste to complete)
         if self.watcher:
             time.sleep(0.5)
             self.watcher.paused = False
@@ -1122,7 +1677,6 @@ class DropdownPopup:
         self._refresh()
 
     def _delete_item(self, item):
-        # Remove from all profiles before deleting from history
         if self.profiles:
             self.profiles.remove_item_from_all(item["id"])
         self.history.delete_item(item["id"])
@@ -1153,9 +1707,19 @@ class DropdownPopup:
         self.root.after(150, self._check_focus)
 
     def _check_focus(self):
-        """Confirm focus truly left before hiding."""
+        """
+        Confirm focus truly left the application before hiding.
+
+        Uses root.focus_displayof() instead of window.focus_get() so that
+        any window belonging to this Tk instance keeps the popup alive —
+        including the side panel, its scrollbar, and any send-to menu.
+
+        window.focus_get() only checked widgets inside the main popup window,
+        so clicking the side-panel scrollbar returned None and incorrectly
+        closed the popup.
+        """
         try:
-            if self.window and not self.window.focus_get():
+            if self.root.focus_displayof() is None:
                 self.hide()
         except Exception:
             self.hide()
@@ -1166,10 +1730,8 @@ class DropdownPopup:
         popup_h  = self.window.winfo_reqheight()
         screen_w = self.window.winfo_screenwidth()
         screen_h = self.window.winfo_screenheight()
-
         if x + popup_w > screen_w:
             x = screen_w - popup_w - 10
         if y + popup_h > screen_h:
             y = screen_h - popup_h - 10
-
         self.window.geometry(f"+{x}+{y}")
