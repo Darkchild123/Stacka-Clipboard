@@ -174,7 +174,24 @@ class HistoryManager:
 
             self.items.remove(item)
             self._save_history()
-            print(f"Item {item_id} deleted.")
+
+    def remove_file_from_item(self, item_id, filepath):
+        """
+        Removes one file path from a multi-file clipboard entry's content list.
+        If the entry becomes empty afterwards the whole entry is deleted.
+        Returns True if the entry still exists, False if it was fully removed.
+        """
+        item = self._find_by_id(item_id)
+        if item is None:
+            return True
+        if isinstance(item.get("content"), list) and filepath in item["content"]:
+            item["content"].remove(filepath)
+            if not item["content"]:
+                self.items.remove(item)
+                self._save_history()
+                return False
+        self._save_history()
+        return True
 
 
     # ============================================================

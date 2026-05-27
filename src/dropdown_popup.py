@@ -745,8 +745,15 @@ class DropdownPopup:
         )
 
         if _is_multi:
+            # Pinned files within the group float to the top of the side panel.
+            # parent item stores a "pinned_files" list of pinned file paths.
+            _pinned_set = set(item.get("pinned_files", []))
+            _files = (
+                [f for f in _files if f in _pinned_set] +
+                [f for f in _files if f not in _pinned_set]
+            )
             _n   = len(_files)
-            _pst = {"win": None, "after_id": None}   # per-row panel state
+            _pst = {"win": None, "after_id": None, "suppress": False}   # per-row panel state
 
             PANEL_W    = 340
             ROW_H      = 40
@@ -758,6 +765,8 @@ class DropdownPopup:
                     _ps["after_id"] = None
 
             def _schedule_close(_ps=_pst):
+                if _ps["suppress"]:
+                    return   # right-click menu is open — never close now
                 _cancel_close(_ps)
                 def _do_close(_ps=_ps):
                     if _ps["win"] and _ps["win"].winfo_exists():
@@ -868,10 +877,13 @@ class DropdownPopup:
                         fill=COLOURS["bg_item"], outline="",
                         tags=(f"row{_i}", "allrows")
                     )
-                    # Left colour strip
+                    # Left colour strip — gold if this file is pinned in the group
                     _is_dir   = os.path.isdir(_fp)
-                    _scol     = TYPE_COLOURS.get(
-                        "folder" if _is_dir else "file", COLOURS["accent"]
+                    _scol = (
+                        COLOURS["pin"] if _fp in _pinned_set
+                        else TYPE_COLOURS.get(
+                            "folder" if _is_dir else "file", COLOURS["accent"]
+                        )
                     )
                     canvas.create_rectangle(
                         0, _y0, STRIP_W, _y1,
@@ -904,6 +916,16 @@ class DropdownPopup:
                         width=_bx1 - TEXT_X - 4,
                         tags=(f"name{_i}", "allnames")
                     )
+                    # Pin icon — only drawn for pinned files (red, larger, top-right)
+                    if _fp in _pinned_set:
+                        canvas.create_text(
+                            BADGE_X - BADGE_W - 8, _cy,
+                            text="📌",
+                            fill=COLOURS["danger"],
+                            font=("Segoe UI", 10, "bold"),
+                            anchor="e",
+                            tags=(f"pin{_i}",)
+                        )
                     # Row separator line
                     canvas.create_line(
                         0, _y1, LIST_W, _y1,
@@ -957,18 +979,20 @@ class DropdownPopup:
                 canvas.bind("<MouseWheel>",
                             lambda e, c=canvas: c.yview_scroll(
                                 int(-1 * (e.delta / 120)), "units"))
-                if self.profiles:
-                    def _on_panel_rclick(e, _cc=_cancel_close):
-                        # Cancel any pending close BEFORE the menu opens,
-                        # because tk_popup causes a <Leave> on the canvas
-                        # which would schedule a 250 ms close — making the
-                        # panel and menu both disappear shortly after.
-                        _cc()
-                        self._show_send_to_menu(e, item)
-                        # Cancel again 60 ms later in case <Leave> fires
-                        # asynchronously after tk_popup returns.
-                        self.root.after(60, _cc)
-                    canvas.bind("<Button-3>", _on_panel_rclick)
+                def _on_panel_rclick(e, _cc=_cancel_close, _ps=_pst):
+                    _ps["suppress"] = True   # block <Leave>→close while menu open
+                    _cc()
+                    # Resolve which file was right-clicked so profile operations
+                    # work on that specific file, not the whole parent group.
+                    _idx = _idx_at(e)
+                    if 0 <= _idx < _n:
+                        _fitem = self._get_or_create_file_item(_files[_idx], item)
+                        self._show_panel_context_menu(e, item, file_item=_fitem)
+                    else:
+                        self._show_panel_context_menu(e, item)
+                    _ps["suppress"] = False
+                    _cc()   # clear any timer that fired just before suppress
+                canvas.bind("<Button-3>", _on_panel_rclick)
 
                 # Keep panel alive while mouse is inside
                 panel.bind("<Enter>", lambda e: _cancel_close())
@@ -985,6 +1009,22 @@ class DropdownPopup:
             for _w in [row, thumb_frame, text_frame, preview_label, source_label]:
                 _w.bind("<Enter>", _row_enter, add="+")
                 _w.bind("<Leave>", _row_leave, add="+")
+
+            # Rebind right-click for multi-file rows.
+            # The plain binding set earlier calls _show_send_to_menu which opens
+            # tk_popup() — that causes a spurious <Leave> on the side panel →
+            # _schedule_close fires → panel disappears.
+            # Replace with a version that (a) uses the full panel context menu
+            # (Pin/Unpin, Add-to/Remove-from, Delete) and (b) wraps with
+            # suppress so the close timer never fires while the menu is open.
+            def _row_rclick(e, _cc=_cancel_close, _i=item, _ps=_pst):
+                _ps["suppress"] = True
+                _cc()
+                self._show_panel_context_menu(e, _i)
+                _ps["suppress"] = False
+                _cc()
+            for _w in [row, thumb_frame, text_frame, preview_label, source_label]:
+                _w.bind("<Button-3>", _row_rclick)
 
 
     def _build_file_panel_row(self, parent, filepath, parent_item, row_w, row_h=32):
@@ -1135,15 +1175,17 @@ class DropdownPopup:
         """
         Shows a right-click context menu on an item with a
         'Send to profile' submenu listing all user profiles.
-        Items already in a profile are shown with a checkmark.
-        Clicking a profile adds (or removes) the item from it.
+
+        Label convention (makes action unambiguous before clicking):
+          "→  Add to X"       — item is NOT yet in profile X
+          "✔  Remove from X"  — item IS already in profile X
         """
         user_profiles = [p for p in self.profiles.get_all_profiles()
                          if not p.get("built_in")]
 
         if not user_profiles:
             # No user profiles yet — show a hint instead
-            menu = tk.Menu(self.window, tearoff=0,
+            menu = tk.Menu(self.root, tearoff=0,
                            bg=COLOURS["bg_item"], fg=COLOURS["text_dim"],
                            relief="flat", bd=0)
             menu.add_command(label="No profiles yet — create one in Settings",
@@ -1151,23 +1193,28 @@ class DropdownPopup:
             menu.tk_popup(event.x_root, event.y_root)
             return
 
-        menu = tk.Menu(self.window, tearoff=0,
+        menu = tk.Menu(self.root, tearoff=0,
                        bg=COLOURS["bg_item"], fg=COLOURS["text"],
                        activebackground=COLOURS["accent"],
                        activeforeground="white",
                        relief="flat", bd=0)
 
-        menu.add_command(label="Send to profile:", state="disabled",
+        menu.add_command(label="Profiles:", state="disabled",
                          font=("Segoe UI", 8))
         menu.add_separator()
 
         item_profiles = set(self.profiles.get_item_profiles(item["id"]))
 
         for profile in user_profiles:
-            pid   = profile["id"]
-            check = "✔  " if pid in item_profiles else "    "
+            pid = profile["id"]
+            if pid in item_profiles:
+                # Already there — label makes removal explicit
+                label = f"✔  Remove from {profile['name']}"
+            else:
+                # Not there yet — label makes addition explicit
+                label = f"→  Add to {profile['name']}"
             menu.add_command(
-                label=f"{check}{profile['name']}",
+                label=label,
                 command=lambda p=pid: self._toggle_item_in_profile(item, p)
             )
 
@@ -1175,13 +1222,190 @@ class DropdownPopup:
 
 
     def _toggle_item_in_profile(self, item, profile_id):
-        """Adds item to profile if not there, removes it if already there."""
+        """
+        Adds item to profile if not there; removes it if already there.
+        After adding, switches the active profile so the user immediately
+        sees the item when the popup re-opens.
+        """
         item_profiles = set(self.profiles.get_item_profiles(item["id"]))
+        # Find profile name for the toast message
+        _pname = next(
+            (p["name"] for p in self.profiles.get_all_profiles()
+             if p["id"] == profile_id),
+            "profile"
+        )
         if profile_id in item_profiles:
             self.profiles.remove_item_from_profile(item["id"], profile_id)
+            _msg = f"Removed from {_pname}"
+            self.root.after(50,  lambda m=_msg: self._show_toast(m, duration=1800))
+            self.root.after(200, self._refresh)
         else:
             self.profiles.add_item_to_profile(item["id"], profile_id)
+            _msg = f"Added to {_pname} ✔"
+            # Stay on the current profile — user switches manually
+            self.root.after(50,  lambda m=_msg: self._show_toast(m, duration=2200))
+            self.root.after(200, self._refresh)
+
+
+    def _toggle_pin_file(self, filepath, parent_item):
+        """
+        Pins or unpins a single file within its multi-file group.
+        Pinned files float to the top of the side panel list and get a
+        gold left-edge strip so they are easy to spot.
+        Does NOT affect the main dropdown or history pin state.
+        """
+        pinned = set(parent_item.get("pinned_files", []))
+        if filepath in pinned:
+            pinned.discard(filepath)
+        else:
+            pinned.add(filepath)
+        parent_item["pinned_files"] = list(pinned)
+        # Persist the change — history_manager._save_history writes items to disk
+        self.history._save_history()
         self._refresh()
+
+    def _delete_file_from_group(self, file_item, parent_item):
+        """
+        Removes one file from a multi-file clipboard entry.
+
+        - Strips the file path from the parent entry's content list.
+        - If the parent becomes empty it is fully deleted from history.
+        - Also removes the auto-created single-file history entry (file_item)
+          so it does not linger as an orphan in history or any profile.
+        """
+        filepath = (file_item["content"][0]
+                    if isinstance(file_item.get("content"), list)
+                    else None)
+        if filepath:
+            still_exists = self.history.remove_file_from_item(
+                parent_item["id"], filepath
+            )
+            if not still_exists and self.profiles:
+                self.profiles.remove_item_from_all(parent_item["id"])
+
+        # Remove the auto-created single-file entry from history and profiles
+        self.history.delete_item(file_item["id"])
+        if self.profiles:
+            self.profiles.remove_item_from_all(file_item["id"])
+
+        self._refresh()
+
+    def _get_or_create_file_item(self, filepath, parent_item):
+        """
+        Returns a single-file history item for filepath.
+
+        Each individual file in a multi-file clipboard entry gets its own
+        deterministic ID (md5 of its path) so it can have independent
+        profile membership.
+
+        If a matching entry already exists in history it is returned as-is.
+        Otherwise a new single-file entry is created and added to history
+        so profile lookups (which cross-reference history) work correctly.
+        """
+        import hashlib, os as _os
+        file_id = "f_" + hashlib.md5(
+            filepath.encode("utf-8", errors="ignore")
+        ).hexdigest()[:24]
+
+        # Return existing history entry if found
+        for it in self.history.items:
+            if it.get("id") == file_id:
+                return it
+
+        # Not in history yet — create a lightweight single-file entry
+        new_item = {
+            "id":        file_id,
+            "type":      "file",
+            "content":   [filepath],
+            "source":    _os.path.dirname(filepath)
+                         or parent_item.get("source", "Unknown"),
+            "timestamp": parent_item.get("timestamp", ""),
+            "pinned":    False,
+        }
+        self.history.add_item(new_item)
+        return new_item
+
+    def _show_panel_context_menu(self, event, item, file_item=None):
+        """
+        Right-click context menu for the side panel (multi-file list).
+
+        item      — the parent clipboard entry (whole group of files).
+                    Used for Pin/Unpin and Delete.
+        file_item — the specific single-file entry the user right-clicked.
+                    Used for Add-to / Remove-from profile so each file has
+                    independent profile membership.  Falls back to item when
+                    called without a specific file (e.g. from the main row).
+        """
+        profile_item = file_item if file_item is not None else item
+        is_pinned = item.get("pinned", False)
+
+        menu = tk.Menu(self.root, tearoff=0,
+                       bg=COLOURS["bg_item"], fg=COLOURS["text"],
+                       activebackground=COLOURS["accent"],
+                       activeforeground="white",
+                       relief="flat", bd=0)
+
+        # ── Pin / Unpin (this specific file within the group) ───────────────
+        # file_item is the single-file entry — its content[0] is the path.
+        # We check parent item's "pinned_files" list, not the item-level pin.
+        _fp = (profile_item["content"][0]
+               if file_item is not None
+               and isinstance(profile_item.get("content"), list)
+               else None)
+        _file_pinned = _fp is not None and _fp in item.get("pinned_files", [])
+        pin_label = "📌  Unpin" if _file_pinned else "📌  Pin"
+        menu.add_command(
+            label=pin_label,
+            command=(
+                (lambda fp=_fp: self._toggle_pin_file(fp, item))
+                if _fp is not None
+                else (lambda: self._toggle_pin(item))
+            )
+        )
+
+        menu.add_separator()
+
+        # ── Add to / Remove from profile (per individual file) ────────────────
+        if self.profiles:
+            user_profiles = [p for p in self.profiles.get_all_profiles()
+                             if not p.get("built_in")]
+            if user_profiles:
+                item_profiles = set(
+                    self.profiles.get_item_profiles(profile_item["id"])
+                )
+                for profile in user_profiles:
+                    pid = profile["id"]
+                    if pid in item_profiles:
+                        label = f"✔  Remove from {profile['name']}"
+                    else:
+                        label = f"→  Add to {profile['name']}"
+                    menu.add_command(
+                        label=label,
+                        command=lambda p=pid: self._toggle_item_in_profile(
+                            profile_item, p
+                        )
+                    )
+                menu.add_separator()
+
+        # ── Delete ───────────────────────────────────────────────────────────
+        # From side panel (file_item set): remove just this file from the group.
+        # From main row (file_item None): delete the whole group from history.
+        if file_item is not None:
+            menu.add_command(
+                label="✕  Delete file",
+                foreground=COLOURS["danger"],
+                activeforeground=COLOURS["danger"],
+                command=lambda: self._delete_file_from_group(profile_item, item)
+            )
+        else:
+            menu.add_command(
+                label="✕  Delete",
+                foreground=COLOURS["danger"],
+                activeforeground=COLOURS["danger"],
+                command=lambda: self._delete_item(item)
+            )
+
+        menu.tk_popup(event.x_root, event.y_root)
 
 
     def _make_draggable(self, widget):

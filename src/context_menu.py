@@ -758,26 +758,4 @@ class ContextMenu:
                     winreg.HKEY_CURRENT_USER,
                     r"Software\Classes\\" + reg_path + r"\command",
                     0,
-                    winreg.KEY_SET_VALUE
-                )
-                winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, command)
-                winreg.CloseKey(cmd_key)
-
-            except Exception as e:
-                print(f"Registry error: {e}")
-
-
-    def _remove_from_registry(self):
-        """Removes all ClipDrop registry entries on quit."""
-        for reg_path in REG_PATHS:
-            try:
-                winreg.DeleteKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Classes\\" + reg_path + r"\command"
-                )
-                winreg.DeleteKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Classes\\" + reg_path
-                )
-            except Exception:
-                pass
+               
