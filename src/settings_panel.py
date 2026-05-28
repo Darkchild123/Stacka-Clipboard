@@ -15,7 +15,8 @@ import webbrowser
 # --- App Information ---
 APP_NAME    = "ClipDrop"
 APP_VERSION = "1.0.0"
-APP_AUTHOR  = "Cosmas"
+APP_AUTHOR  = "Cosmas Nwachukwu"
+APP_EMAIL   = "finecosmas@gmail.com"
 GITHUB_URL  = "https://github.com/Darkchild123/Project-ClipDrop"
 
 # --- Colour themes ---
@@ -60,10 +61,11 @@ FONT_LINK    = ("Segoe UI", 9, "underline")
 
 class SettingsPanel:
 
-    def __init__(self, history_manager, profile_manager=None):
+    def __init__(self, history_manager, profile_manager=None, tk_root=None):
         self.history  = history_manager
         self.profiles = profile_manager
-        self.root     = None
+        self.tk_root  = tk_root   # main tk.Tk() root from main.py
+        self.root     = None      # our Toplevel window
 
 
     def show(self):
@@ -71,7 +73,7 @@ class SettingsPanel:
         Builds and displays the settings window.
         The window is centred on the screen when it opens.
         """
-        self.root = tk.Tk()
+        self.root = tk.Toplevel(self.tk_root)
         self.root.title("ClipDrop Settings")
         self.root.configure(bg=COLOURS["bg"])
         self.root.resizable(False, False)       # Fixed size — no resizing
@@ -84,11 +86,6 @@ class SettingsPanel:
         self.root.configure(bg=COLOURS["bg"])
         self.root.attributes("-alpha", opacity)
 
-        # Set the window size and centre it on screen
-        window_width  = 420
-        window_height = 780
-        self._centre_window(window_width, window_height)
-
         # Build all sections of the settings panel
         self._build_header()
         self._build_divider()
@@ -98,15 +95,23 @@ class SettingsPanel:
         self._build_divider()
         self._build_profiles_section()
         self._build_divider()
-        self._build_danger_section()
-        self._build_divider()
         self._build_info_section()
         self._build_footer()
 
         # Handle the window close button (X)
         self.root.protocol("WM_DELETE_WINDOW", self._close)
 
-        self.root.mainloop()
+        # Position using screen percentages so it works on any resolution.
+        # Appears at ~30% from the left, ~5% from the top.
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x  = int(sw * 0.68)
+        y  = int(sh * 0.15)
+        self.root.geometry(f"+{x}+{y}")
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
 
 
     # ============================================================
@@ -117,7 +122,7 @@ class SettingsPanel:
         """
         The top header bar with the ClipDrop logo and title.
         """
-        header = tk.Frame(self.root, bg=COLOURS["accent"], height=60)
+        header = tk.Frame(self.root, bg=COLOURS["accent"], height=44)
         header.pack(fill="x")
         header.pack_propagate(False)
 
@@ -127,7 +132,7 @@ class SettingsPanel:
             bg=COLOURS["accent"],
             fg="white",
             font=FONT_TITLE,
-            pady=16
+            pady=8
         ).pack()
 
 
@@ -136,32 +141,28 @@ class SettingsPanel:
         Appearance section — lets the user choose Dark or Light theme
         and set the popup transparency with a slider.
         """
-        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=16, pady=8)
         section.pack(fill="x")
 
         tk.Label(section, text="🎨  Appearance",
                  bg=COLOURS["bg"], fg=COLOURS["text"],
                  font=FONT_HEADING, anchor="w").pack(fill="x")
 
-        tk.Label(section, text="Theme and transparency for the clipboard popup.",
-                 bg=COLOURS["bg"], fg=COLOURS["text_dim"],
-                 font=FONT_SMALL, anchor="w").pack(fill="x", pady=(2, 12))
-
         # --- Theme toggle ---
         theme_row = tk.Frame(section, bg=COLOURS["bg"])
-        theme_row.pack(fill="x", pady=(0, 12))
+        theme_row.pack(fill="x", pady=(0, 6))
 
         tk.Label(theme_row, text="Theme:",
                  bg=COLOURS["bg"], fg=COLOURS["text"],
-                 font=FONT_BODY, width=14, anchor="w").pack(side="left")
+                 font=FONT_BODY, width=10, anchor="w").pack(side="left")
 
         current_theme = self.history.settings.get("theme", "dark")
 
         self._dark_btn  = tk.Label(theme_row, text="🌙  Dark",
-                                   font=FONT_BODY, padx=14, pady=6,
+                                   font=FONT_BODY, padx=10, pady=4,
                                    cursor="hand2", relief="flat")
         self._light_btn = tk.Label(theme_row, text="☀️  Light",
-                                   font=FONT_BODY, padx=14, pady=6,
+                                   font=FONT_BODY, padx=10, pady=4,
                                    cursor="hand2", relief="flat")
         self._dark_btn.pack(side="left", padx=(0, 6))
         self._light_btn.pack(side="left")
@@ -179,7 +180,7 @@ class SettingsPanel:
         current_opacity = self.history.settings.get("transparency", 1.0)
 
         slider_row = tk.Frame(section, bg=COLOURS["bg"])
-        slider_row.pack(fill="x", pady=(6, 0))
+        slider_row.pack(fill="x", pady=(3, 0))
 
         self._opacity_var = tk.DoubleVar(value=current_opacity)
         slider = tk.Scale(
@@ -251,8 +252,6 @@ class SettingsPanel:
         self._build_divider()
         self._build_profiles_section()
         self._build_divider()
-        self._build_danger_section()
-        self._build_divider()
         self._build_info_section()
         self._build_footer()
 
@@ -281,7 +280,7 @@ class SettingsPanel:
         Section for controlling clipboard history behaviour.
         Lets the user set how many items ClipDrop remembers.
         """
-        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=16, pady=8)
         section.pack(fill="x")
 
         # Section heading
@@ -294,15 +293,6 @@ class SettingsPanel:
             anchor="w"
         ).pack(fill="x")
 
-        tk.Label(
-            section,
-            text="Control how many items ClipDrop keeps in memory.",
-            bg=COLOURS["bg"],
-            fg=COLOURS["text_dim"],
-            font=FONT_SMALL,
-            anchor="w"
-        ).pack(fill="x", pady=(2, 12))
-
         # --- History Size Limit ---
         row = tk.Frame(section, bg=COLOURS["bg"])
         row.pack(fill="x")
@@ -313,7 +303,7 @@ class SettingsPanel:
             bg=COLOURS["bg"],
             fg=COLOURS["text"],
             font=FONT_BODY,
-            width=20,
+            width=16,
             anchor="w"
         ).pack(side="left")
 
@@ -350,7 +340,7 @@ class SettingsPanel:
             command=self._save_limit,
             colour=COLOURS["accent"],
             hover=COLOURS["accent_hover"],
-            pady=(10, 0)
+            pady=(6, 0)
         )
 
         # Feedback label — shows "Saved!" after clicking Save
@@ -372,7 +362,7 @@ class SettingsPanel:
         if not self.profiles:
             return
 
-        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=16, pady=8)
         section.pack(fill="x")
 
         tk.Label(section, text="👤  Profiles",
@@ -382,7 +372,7 @@ class SettingsPanel:
         tk.Label(section,
                  text="Organise your clipboard into named workflow collections.",
                  bg=COLOURS["bg"], fg=COLOURS["text_dim"],
-                 font=FONT_SMALL, anchor="w").pack(fill="x", pady=(2, 10))
+                 font=FONT_SMALL, anchor="w").pack(fill="x", pady=(2, 6))
 
         # Profile list — a scrollable listbox
         list_frame = tk.Frame(section, bg=COLOURS["border"], padx=1, pady=1)
@@ -394,7 +384,7 @@ class SettingsPanel:
             selectbackground=COLOURS["accent"],
             selectforeground="white",
             font=FONT_BODY,
-            height=5,
+            height=3,
             relief="flat",
             bd=0,
             activestyle="none"
@@ -417,7 +407,7 @@ class SettingsPanel:
 
         # Row 1 — create / rename / delete
         row1 = tk.Frame(section, bg=COLOURS["bg"])
-        row1.pack(fill="x", pady=(8, 4))
+        row1.pack(fill="x", pady=(2, 2))
         _make_profile_btn(row1, "＋ New",    self._new_profile,            COLOURS["bg_section"], COLOURS["accent"])
         _make_profile_btn(row1, "✎ Rename",  self._rename_profile,         COLOURS["bg_section"], COLOURS["accent"])
         _make_profile_btn(row1, "✕ Delete",  self._delete_profile,         COLOURS["bg_section"], COLOURS["accent"])
@@ -530,16 +520,48 @@ class SettingsPanel:
 
         if profile["id"] == "general":
             confirmed = messagebox.askyesno(
-                title="Clear All History",
-                message="Clear the entire clipboard history?\n\nThis will delete all items from General and cannot be undone.",
+                title="Clear General",
+                message=(
+                    "Clear all items from General?\n\n"
+                    "Items that belong to a named profile will be kept in "
+                    "those profiles. Only items that exist nowhere else will "
+                    "be permanently deleted.\n\nThis cannot be undone."
+                ),
                 icon="warning",
                 parent=self.root
             )
             if confirmed:
-                self.history.clear_all()
+                # Collect every item ID that lives in at least one named profile
+                protected_ids = set()
+                if self.profiles:
+                    for p in self.profiles.get_all_profiles():
+                        if not p.get("built_in"):
+                            protected_ids.update(p.get("item_ids", []))
+
+                # Permanently delete items with no named-profile home
+                to_delete = [
+                    it for it in list(self.history.items)
+                    if it["id"] not in protected_ids
+                ]
+                for it in to_delete:
+                    self.history.delete_item(it["id"])
+
+                # Hide items that belong to named profiles so they no longer
+                # appear in General, but remain accessible from those profiles
+                kept = 0
+                for it in self.history.items:
+                    if it["id"] in protected_ids:
+                        it["hidden"] = True
+                        kept += 1
+                if kept:
+                    self.history._save_history()
+
                 self._refresh_profile_list()
-                messagebox.showinfo("Done", "All clipboard history has been cleared.",
-                                    parent=self.root)
+                messagebox.showinfo(
+                    "Done",
+                    f"General cleared.\n{kept} item(s) moved to their profile(s) only.",
+                    parent=self.root
+                )
         else:
             profile_name = profile["name"]
             confirmed = messagebox.askyesno(
@@ -580,7 +602,7 @@ class SettingsPanel:
         The danger zone — contains the Clear All History button.
         Styled in red to signal it's a destructive action.
         """
-        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=16, pady=8)
         section.pack(fill="x")
 
         tk.Label(
@@ -599,7 +621,7 @@ class SettingsPanel:
             fg=COLOURS["text_dim"],
             font=FONT_SMALL,
             anchor="w"
-        ).pack(fill="x", pady=(2, 12))
+        ).pack(fill="x", pady=(2, 6))
 
         self._make_button(
             section,
@@ -614,7 +636,7 @@ class SettingsPanel:
         """
         App information section — version, author, and GitHub link.
         """
-        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=24, pady=16)
+        section = tk.Frame(self.root, bg=COLOURS["bg"], padx=16, pady=8)
         section.pack(fill="x")
 
         tk.Label(
@@ -624,12 +646,13 @@ class SettingsPanel:
             fg=COLOURS["text"],
             font=FONT_HEADING,
             anchor="w"
-        ).pack(fill="x", pady=(0, 10))
+        ).pack(fill="x", pady=(0, 6))
 
         # Info rows
         info_rows = [
             ("Version",  APP_VERSION),
             ("Author",   APP_AUTHOR),
+            ("Email",    APP_EMAIL),
             ("Platform", "Windows"),
         ]
 
@@ -658,7 +681,7 @@ class SettingsPanel:
 
         # GitHub link — clicking it opens the browser
         row = tk.Frame(section, bg=COLOURS["bg"])
-        row.pack(fill="x", pady=(8, 0))
+        row.pack(fill="x", pady=(4, 0))
 
         tk.Label(
             row,
@@ -689,7 +712,7 @@ class SettingsPanel:
         """
         A simple footer at the bottom with a Close button.
         """
-        footer = tk.Frame(self.root, bg=COLOURS["bg_section"], pady=16)
+        footer = tk.Frame(self.root, bg=COLOURS["bg_section"], pady=6)
         footer.pack(fill="x", side="bottom")
 
         self._make_button(
@@ -791,34 +814,4 @@ class SettingsPanel:
         Creates a styled button with hover effects.
         Used throughout the settings panel for consistency.
         """
-        kwargs = dict(
-            text=text,
-            bg=colour,
-            fg="white",
-            font=FONT_BODY,
-            relief="flat",
-            cursor="hand2",
-            padx=16,
-            pady=8,
-            bd=0
-        )
-        if width:
-            kwargs["width"] = width
-
-        btn = tk.Label(parent, **kwargs)
-        btn.pack(pady=pady)
-        btn.bind("<Button-1>", lambda e: command())
-        btn.bind("<Enter>", lambda e: btn.configure(bg=hover))
-        btn.bind("<Leave>", lambda e: btn.configure(bg=colour))
-
-
-    def _centre_window(self, width, height):
-        """
-        Calculates the correct position to centre the window
-        on the user's screen, regardless of screen size.
-        """
-        screen_w = self.root.winfo_screenwidth()
-        screen_h = self.root.winfo_screenheight()
-        x = (screen_w // 2) - (width // 2)
-        y = (screen_h // 2) - (height // 2)
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+     

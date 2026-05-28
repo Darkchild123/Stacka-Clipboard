@@ -209,10 +209,6 @@ class DropdownPopup:
         # General so the user always sees their history, not a blank popup.
         if self.profiles:
             items = self.profiles.get_active_items()
-            active = self.profiles.get_active_profile()
-            if not items and not active.get("built_in"):
-                self.profiles.set_active("general")
-                items = self.profiles.get_active_items()
         else:
             items = self.history.get_all()
 
@@ -316,6 +312,40 @@ class DropdownPopup:
             self.root.after(40, lambda: _fade_out(alpha))
 
         self.root.after(duration, lambda: _fade_out() if toast.winfo_exists() else None)
+
+
+    def _position_popup(self, x, y):
+        """
+        Positions the popup window near (x, y) — the cursor coordinates —
+        while keeping the window fully within the visible screen area.
+
+        Strategy:
+          • Try to place the top-left corner at (x, y).
+          • If that would push the right edge off-screen, shift left.
+          • If that would push the bottom edge off-screen, shift up so the
+            popup appears above the cursor instead of below.
+        """
+        w = self.window.winfo_reqwidth()
+        h = self.window.winfo_reqheight()
+
+        sw = self.window.winfo_screenwidth()
+        sh = self.window.winfo_screenheight()
+
+        # Horizontal: try cursor x, clamp to screen
+        px = x
+        if px + w > sw:
+            px = sw - w - 4
+        if px < 0:
+            px = 0
+
+        # Vertical: try below cursor, flip above if needed
+        py = y
+        if py + h > sh:
+            py = y - h
+        if py < 0:
+            py = 0
+
+        self.window.geometry(f"+{px}+{py}")
 
 
     def _fade_in(self, alpha=0.0):
@@ -496,28 +526,55 @@ class DropdownPopup:
 
 
     def _build_empty_state(self):
-        """Shows a message when history is empty."""
+        """Shows a message when the active profile is empty.
+        Still shows the profile switcher so the user can switch profiles."""
         border = tk.Frame(self.window, bg=COLOURS["border"], padx=1, pady=1)
         border.pack(fill="both", expand=True)
         inner = tk.Frame(border, bg=COLOURS["bg"])
         inner.pack(fill="both", expand=True)
 
-        # Header (draggable even on empty state)
+        # Header — same as _build_content, includes profile switcher
         header = tk.Frame(inner, bg=COLOURS["accent"], height=36)
         header.pack(fill="x")
         header.pack_propagate(False)
-        lbl = tk.Label(
+
+        lbl_title = tk.Label(
             header, text="📋  ClipDrop",
             bg=COLOURS["accent"], fg="white",
             font=("Segoe UI", 10, "bold"), padx=PADDING
         )
-        lbl.pack(side="left", fill="y")
+        lbl_title.pack(side="left", fill="y")
         self._make_draggable(header)
-        self._make_draggable(lbl)
+        self._make_draggable(lbl_title)
+
+        # Profile switcher — always visible so user can switch away from
+        # an empty profile without having to copy something first
+        if self.profiles:
+            active_name = self.profiles.get_active_profile()["name"]
+            lbl_profile = tk.Label(
+                header, text=f"{active_name}  ▾",
+                bg=COLOURS["accent"], fg="#c7d2fe",
+                font=("Segoe UI", 8, "bold"),
+                padx=6, cursor="hand2"
+            )
+            lbl_profile.pack(side="right", fill="y")
+            lbl_profile.bind("<Button-1>",
+                lambda e, lbl=lbl_profile: self._show_profile_menu(lbl))
+            lbl_profile.bind("<Enter>",
+                lambda e: lbl_profile.configure(fg="white"))
+            lbl_profile.bind("<Leave>",
+                lambda e: lbl_profile.configure(fg="#c7d2fe"))
+
+        # Empty message
+        if self.profiles and not self.profiles.get_active_profile().get("built_in"):
+            msg = "This profile is empty.\nAdd items via the main list."
+        else:
+            msg = "No clipboard history yet.\nCopy something to get started!"
+
 
         tk.Label(
             inner,
-            text="📋\n\nNo clipboard history yet.\nCopy something to get started!",
+            text=f"📋\n\n{msg}",
             bg=COLOURS["bg"], fg=COLOURS["text_dim"],
             font=FONT_PREVIEW, padx=20, pady=24,
             justify="center"
@@ -827,6 +884,7 @@ class DropdownPopup:
                 panel = tk.Toplevel(self.root)
                 panel.overrideredirect(True)
                 panel.attributes("-topmost", True)
+                panel.attributes("-alpha", getattr(self, "_opacity", 1.0))
                 panel.configure(bg=COLOURS["border"])
                 _ps["win"] = panel
                 # Non-activating — clicks register without stealing focus
@@ -2056,7 +2114,7 @@ class DropdownPopup:
         ghost = tk.Toplevel(self.root)
         ghost.overrideredirect(True)
         ghost.attributes("-topmost", True)
-        ghost.attributes("-alpha", 0.85)
+        ghost.attributes("-alpha", min(0.85, getattr(self, "_opacity", 1.0)))
         ghost.configure(bg=COLOURS["accent"])
         icon    = "📄" if item["type"] == "text" else ("🖼️" if item["type"] == "image" else "📁")
         preview = self.history.get_preview(item)
@@ -2190,70 +2248,44 @@ class DropdownPopup:
         if self.profiles:
             active = self.profiles.get_active_profile()
             if active["id"] == "general":
-                # General: permanently delete from history and all profiles
+                # General: permanently remove from history and all profiles
                 self.profiles.remove_item_from_all(item["id"])
                 self.history.delete_item(item["id"])
             else:
-                # Named profile: only remove from this profile — item stays
-                # in history and in any other profile it belongs to
+                # Named profile: remove only from this profile
                 self.profiles.remove_item_from_profile(item["id"], active["id"])
         else:
             self.history.delete_item(item["id"])
         self._refresh()
 
-    def _move_up(self, item):
-        self.history.move_up(item["id"])
-        self._refresh()
-
-    def _move_down(self, item):
-        self.history.move_down(item["id"])
-        self._refresh()
-
-    def _refresh(self):
-        """Rebuilds the popup at the same position after any change."""
-        if self.window:
-            x = self.window.winfo_x()
-            y = self.window.winfo_y()
-            self._build_and_show(x, y)
-
-
-    # ============================================================
-    # HELPERS
-    # ============================================================
-
-    def _on_focus_out(self, event):
-        """Hide popup when user clicks outside it."""
-        self.root.after(150, self._check_focus)
-
-    def _check_focus(self):
+    def _get_or_create_file_item(self, filepath, parent_item):
+        """Return (or lazily create) a hidden history entry for a single file
+        that lives inside a multi-file clipboard item.  The entry is marked
+        hidden=True so it never appears in General, but named profiles can
+        add it explicitly.
         """
-        Confirm focus truly left the application before hiding.
+        import os as _os
+        import hashlib as _hash
+        file_id = _hash.md5(filepath.encode("utf-8")).hexdigest()
 
-        Uses root.focus_displayof() instead of window.focus_get() so that
-        any window belonging to this Tk instance keeps the popup alive —
-        including the side panel, its scrollbar, and any send-to menu.
+        # Return existing — retrofix hidden flag if missing
+        for it in self.history.items:
+            if it.get("id") == file_id:
+                if not it.get("hidden"):
+                    it["hidden"] = True
+                    self.history._save_history()
+                return it
 
-        window.focus_get() only checked widgets inside the main popup window,
-        so clicking the side-panel scrollbar returned None and incorrectly
-        closed the popup.
-        """
-        if self._suppress_focus_out:
-            self.root.after(200, self._check_focus)
-            return
-        try:
-            if self.root.focus_displayof() is None:
-                self.hide()
-        except Exception:
-            self.hide()
-
-    def _position_popup(self, x, y):
-        """Positions popup at cursor, keeping it fully on screen."""
-        popup_w  = self.window.winfo_reqwidth()
-        popup_h  = self.window.winfo_reqheight()
-        screen_w = self.window.winfo_screenwidth()
-        screen_h = self.window.winfo_screenheight()
-        if x + popup_w > screen_w:
-            x = screen_w - popup_w - 10
-        if y + popup_h > screen_h:
-            y = screen_h - popup_h - 10
-        self.window.geometry(f"+{x}+{y}")
+        # Create new with hidden=True, append at end (not add_item which inserts at top)
+        new_item = {
+            "id":        file_id,
+            "type":      "file",
+            "content":   [filepath],
+            "source":    _os.path.dirname(filepath) or parent_item.get("source", "Unknown"),
+            "timestamp": parent_item.get("timestamp", ""),
+            "pinned":    False,
+            "hidden":    True,
+        }
+        self.history.items.append(new_item)
+        self.history._save_history()
+        return new_item

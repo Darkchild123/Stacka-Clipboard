@@ -93,16 +93,15 @@ class TrayIcon:
 
     def _open_settings(self, icon, menu_item):
         """
-        Opens the Settings panel when the user clicks 'Settings'
-        in the tray menu. We run it in a separate thread so it
-        doesn't freeze the tray icon.
+        Opens the Settings panel on the main tkinter thread.
+        Toplevel windows must be created on the same thread as tk.Tk().
         """
-        def open():
+        def open_on_main():
             from settings_panel import SettingsPanel
-            panel = SettingsPanel(self.history, self.profiles)
+            panel = SettingsPanel(self.history, self.profiles, tk_root=self.root)
             panel.show()
 
-        threading.Thread(target=open, daemon=True).start()
+        self.root.after(0, open_on_main)
 
 
     def _clear_history(self, icon, menu_item):

@@ -411,12 +411,16 @@ class HistoryManager:
     def _load_settings(self):
         """
         Loads settings from config.json.
-        If the file doesn't exist, returns the default settings.
+        Falls back to DEFAULT_SETTINGS if the file is missing or unreadable.
         """
-        if not os.path.exists(SETTINGS_FILE):
-            return DEFAULT_SETTINGS.copy()
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            return DEFAULT_SETTINGS.copy()
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Merge with defaults so new keys are always present
+                merged = dict(DEFAULT_SETTINGS)
+                merged.update(data)
+                return merged
+            except Exception as e:
+                print(f"Failed to load settings: {e}")
+        return dict(DEFAULT_SETTINGS)
