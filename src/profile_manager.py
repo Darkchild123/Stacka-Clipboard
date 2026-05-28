@@ -60,19 +60,33 @@ class ProfileManager:
         """
         Returns the clipboard items to display for the active profile.
 
-        General  → all items from history (no filtering)
-        Any other profile → only items whose IDs are listed in the
-                            profile's item_ids, in history order.
-                            Orphaned IDs (deleted items) are skipped.
+        General      → visible items only (hidden auto-created entries excluded)
+        Named profile → all items in the profile, sorted so that:
+                          • pinned items appear first (newest pinned at the top)
+                          • unpinned items follow, newest at the top
+                        "Newest" is determined by each item's position in
+                        history.items — lower index means more recently used.
         """
-        profile   = self.get_active_profile()
-        all_items = self.history.get_all()
+        profile = self.get_active_profile()
 
         if profile["id"] == GENERAL_ID:
-            return all_items
+            return self.history.get_all()   # already excludes hidden
 
-        id_set = set(profile.get("item_ids", []))
-        return [item for item in all_items if item["id"] in id_set]
+        id_set     = set(profile.get("item_ids",        []))
+        pinned_ids = set(profile.get("pinned_item_ids", []))
+
+        # Build a position map — lower index = more recently used.
+        pos = {item["id"]: i for i, item in enumerate(self.history.items)}
+
+        # Collect only items that belong to this profile
+        profile_items = [it for it in self.history.items if it["id"] in id_set]
+
+        # Sort: profile-pinned items first, then by recency
+        profile_items.sort(
+            key=lambda x: (0 if x["id"] in pinned_ids else 1, pos.get(x["id"], 9999))
+        )
+
+        return profile_items
 
 
     def get_profile_item_count(self, profile_id):
@@ -80,7 +94,7 @@ class ProfileManager:
         if profile_id == GENERAL_ID:
             return len(self.history.get_all())
 
-        all_ids   = {item["id"] for item in self.history.get_all()}
+        all_ids   = {item["id"] for item in self.history.get_all_including_hidden()}
         profile   = self._find(profile_id)
         if not profile:
             return 0
@@ -163,6 +177,41 @@ class ProfileManager:
 
 
     # ============================================================
+    # PER-PROFILE PIN STATE
+    # ============================================================
+
+    def toggle_pin_in_profile(self, item_id, profile_id):
+        """
+        Pins or unpins an item within a named profile only.
+        This is independent of the item's global pin state in history.
+        The General profile does not have per-profile pins —
+        it always uses the item's global pinned flag.
+        """
+        if profile_id == GENERAL_ID:
+            return
+        profile = self._find(profile_id)
+        if not profile:
+            return
+        pinned = profile.setdefault("pinned_item_ids", [])
+        if item_id in pinned:
+            pinned.remove(item_id)
+            status = "unpinned"
+        else:
+            pinned.append(item_id)
+            status = "pinned"
+        self._save()
+        print(f"Item {item_id} {status} in profile {profile_id}")
+
+    def is_pinned_in_profile(self, item_id, profile_id):
+        """Returns True if the item is pinned within this specific profile."""
+        if profile_id == GENERAL_ID:
+            return False   # General uses the item's global pinned flag
+        profile = self._find(profile_id)
+        if not profile:
+            return False
+        return item_id in profile.get("pinned_item_ids", [])
+
+    # ============================================================
     # ASSIGNING ITEMS TO PROFILES
     # ============================================================
 
@@ -177,10 +226,13 @@ class ProfileManager:
 
 
     def remove_item_from_profile(self, item_id, profile_id):
-        """Removes an item from a specific profile."""
+        """Removes an item from a specific profile (and its profile-level pin)."""
         profile = self._find(profile_id)
         if profile and item_id in profile.get("item_ids", []):
             profile["item_ids"].remove(item_id)
+            pinned = profile.get("pinned_item_ids", [])
+            if item_id in pinned:
+                pinned.remove(item_id)
             self._save()
 
 
@@ -201,13 +253,16 @@ class ProfileManager:
 
     def remove_item_from_all(self, item_id):
         """
-        Removes an item from every profile.
+        Removes an item from every profile (item_ids and pinned_item_ids).
         Call this when an item is deleted from history so no
         profile holds a reference to a non-existent item.
         """
         for profile in self.profiles:
             if item_id in profile.get("item_ids", []):
                 profile["item_ids"].remove(item_id)
+            pinned = profile.get("pinned_item_ids", [])
+            if item_id in pinned:
+                pinned.remove(item_id)
         self._save()
 
 
@@ -224,51 +279,92 @@ class ProfileManager:
     # ============================================================
 
     def _save(self):
-        """Saves all profile data to profiles.json."""
+        """
+        Saves all profile data to profiles.json using an atomic write.
+
+        Strategy: write to a .tmp file first, then os.replace() it into place.
+        os.replace() is atomic on both Windows and Linux, so a crash or
+        interruption during the write can never leave profiles.json in a
+        half-written (corrupt) state.  A backup copy (.bak) is also kept so
+        _load() can recover from any remaining edge-case corruption.
+        """
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            with open(PROFILES_FILE, "w", encoding="utf-8") as f:
-                json.dump(
-                    {"active_id": self.active_id, "profiles": self.profiles},
-                    f, indent=2, ensure_ascii=False
-                )
+            tmp_path = PROFILES_FILE + ".tmp"
+            bak_path = PROFILES_FILE + ".bak"
+            payload  = {"active_id": self.active_id, "profiles": self.profiles}
+
+            # Write to temp file — if this fails, the real file is untouched
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Back up the current good file before replacing it
+            if os.path.exists(PROFILES_FILE):
+                try:
+                    import shutil
+                    shutil.copy2(PROFILES_FILE, bak_path)
+                except Exception:
+                    pass   # backup failure is non-fatal
+
+            # Atomic replace — tmp becomes the live file
+            os.replace(tmp_path, PROFILES_FILE)
+
         except Exception as e:
             print(f"Failed to save profiles: {e}")
 
 
     def _load(self):
-        """Loads profile data from profiles.json. Creates defaults if missing."""
-        if not os.path.exists(PROFILES_FILE):
-            self.profiles  = self._default_profiles()
-            self.active_id = GENERAL_ID
-            self._save()
-            return
-        try:
-            with open(PROFILES_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.profiles  = data.get("profiles", self._default_profiles())
-            saved_id       = data.get("active_id", GENERAL_ID)
+        """
+        Loads profile data from profiles.json.
 
-            # Always ensure General exists as the first entry
-            if not any(p["id"] == GENERAL_ID for p in self.profiles):
-                self.profiles.insert(0, self._general_profile())
+        Recovery order:
+          1. Try profiles.json  (the live file)
+          2. Try profiles.json.bak (the last known-good backup)
+          3. Fall back to a fresh General-only default
 
-            # Restore the last active profile only if it still has items.
-            # If it is empty (or no longer exists), fall back to General so
-            # the user doesn't open the app to a blank history.
-            saved_profile = self._find(saved_id)
-            if (saved_id == GENERAL_ID or
-                    (saved_profile and saved_profile.get("item_ids"))):
-                self.active_id = saved_id
-            else:
-                self.active_id = GENERAL_ID
-                print(f"Last profile '{saved_id}' is empty — reverting to General.")
+        A single corrupt write never wipes the user's profiles —
+        the backup (written just before each successful save) takes over.
+        """
+        bak_path = PROFILES_FILE + ".bak"
 
-        except Exception as e:
-            print(f"Failed to load profiles: {e}")
-            self.profiles  = self._default_profiles()
-            self.active_id = GENERAL_ID
+        for path in [PROFILES_FILE, bak_path]:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
+                self.profiles = data.get("profiles", self._default_profiles())
+                saved_id      = data.get("active_id", GENERAL_ID)
+
+                # Always ensure General exists as the first entry
+                if not any(p["id"] == GENERAL_ID for p in self.profiles):
+                    self.profiles.insert(0, self._general_profile())
+
+                # Restore the last active profile only if it still has items.
+                saved_profile = self._find(saved_id)
+                if (saved_id == GENERAL_ID or
+                        (saved_profile and saved_profile.get("item_ids"))):
+                    self.active_id = saved_id
+                else:
+                    self.active_id = GENERAL_ID
+                    print(f"Last profile '{saved_id}' is empty — reverting to General.")
+
+                if path == bak_path:
+                    print("Profiles recovered from backup — re-saving clean copy.")
+                    self._save()
+                return
+
+            except Exception as e:
+                print(f"Failed to load profiles from {os.path.basename(path)}: {e}")
+
+        # Both files unreadable — start fresh
+        print("No readable profile file found — creating defaults.")
+        self.profiles  = self._default_profiles()
+        self.active_id = GENERAL_ID
+        self._save()
 
     # ============================================================
     # INTERNAL HELPERS
@@ -278,7 +374,8 @@ class ProfileManager:
         return [self._general_profile()]
 
     def _general_profile(self):
-        return {"id": GENERAL_ID, "name": "General", "built_in": True, "item_ids": []}
+        return {"id": GENERAL_ID, "name": "General", "built_in": True,
+                "item_ids": [], "pinned_item_ids": []}
 
     def _find(self, profile_id):
         for p in self.profiles:

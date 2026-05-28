@@ -90,11 +90,23 @@ class HistoryManager:
 
     def get_all(self):
         """
-        Returns all items in the correct display order:
-        Pinned items first (in their order), then the rest.
+        Returns all visible items in display order: pinned first, then rest.
+        Items with hidden=True (auto-created side-panel entries) are excluded
+        so they never appear in the General clipboard list.
         """
-        pinned = [item for item in self.items if item.get("pinned")]
-        unpinned = [item for item in self.items if not item.get("pinned")]
+        visible  = [i for i in self.items if not i.get("hidden")]
+        pinned   = [i for i in visible if i.get("pinned")]
+        unpinned = [i for i in visible if not i.get("pinned")]
+        return pinned + unpinned
+
+    def get_all_including_hidden(self):
+        """
+        Returns every item regardless of hidden flag.
+        Used by ProfileManager so hidden auto-created entries still appear
+        in named profiles they have been assigned to.
+        """
+        pinned   = [i for i in self.items if i.get("pinned")]
+        unpinned = [i for i in self.items if not i.get("pinned")]
         return pinned + unpinned
 
 
@@ -282,6 +294,12 @@ class HistoryManager:
     # INTERNAL HELPERS (private methods — used only inside this file)
     # ============================================================
 
+    def _ensure_folders(self):
+        """Makes sure all the folders ClipDrop needs actually exist."""
+        os.makedirs(DATA_DIR,     exist_ok=True)
+        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        os.makedirs(IMAGES_DIR,   exist_ok=True)
+
     def _find_by_id(self, item_id):
         """
         Searches the history list for an item with a matching ID.
@@ -332,31 +350,53 @@ class HistoryManager:
 
     def _save_history(self):
         """
-        Saves the current history list to history.json on disk.
-        JSON is a simple text format for storing structured data.
+        Saves the current history list to history.json using an atomic write.
+
+        Writes to a .tmp file first, then os.replace() atomically promotes it.
+        A .bak copy is kept so _load_history() can recover from corruption.
         """
         try:
-            # We can't save PIL Image objects to JSON,
-            # but by now images are stored as file paths (strings), so it's fine
-            with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            tmp_path = HISTORY_FILE + ".tmp"
+            bak_path = HISTORY_FILE + ".bak"
+
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self.items, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            if os.path.exists(HISTORY_FILE):
+                try:
+                    import shutil
+                    shutil.copy2(HISTORY_FILE, bak_path)
+                except Exception:
+                    pass
+
+            os.replace(tmp_path, HISTORY_FILE)
+
         except Exception as e:
             print(f"Failed to save history: {e}")
 
 
     def _load_history(self):
         """
-        Loads history from the history.json file on disk.
-        If the file doesn't exist yet, returns an empty list.
+        Loads history from history.json.
+        Falls back to history.json.bak if the main file is corrupt.
         """
-        if not os.path.exists(HISTORY_FILE):
-            return []
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Failed to load history: {e}")
-            return []
+        bak_path = HISTORY_FILE + ".bak"
+
+        for path in [HISTORY_FILE, bak_path]:
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if path == bak_path:
+                    print("History recovered from backup.")
+                return data
+            except Exception as e:
+                print(f"Failed to load history from {os.path.basename(path)}: {e}")
+
+        return []
 
 
     def _save_settings(self):
@@ -379,15 +419,4 @@ class HistoryManager:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Failed to load settings: {e}")
             return DEFAULT_SETTINGS.copy()
-
-
-    def _ensure_folders(self):
-        """
-        Makes sure all the folders ClipDrop needs actually exist.
-        If they don't, it creates them. This runs once at startup.
-        """
-        os.makedirs(DATA_DIR, exist_ok=True)
-        os.makedirs(SETTINGS_DIR, exist_ok=True)
-        os.makedirs(IMAGES_DIR, exist_ok=True)

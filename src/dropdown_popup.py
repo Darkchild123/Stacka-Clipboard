@@ -140,6 +140,9 @@ class DropdownPopup:
         self._drag_start_y = 0
         self._is_dragging  = False
 
+        # Suppress focus-out hiding while a context menu is open
+        self._suppress_focus_out = False
+
         # Bind Escape key globally to close popup
         self.root.bind_all("<Escape>", lambda e: self.hide())
 
@@ -236,7 +239,8 @@ class DropdownPopup:
         self.window.withdraw()
 
         # Escape still works via the mouse-hook left-click detection
-        self.window.bind("<Escape>", lambda e: self.hide())
+        self.window.bind("<FocusIn>",  lambda e: setattr(self, "_suppress_focus_out", False))
+        self.window.bind("<Escape>",   lambda e: self.hide())
 
         if not items:
             self._build_empty_state()
@@ -553,7 +557,15 @@ class DropdownPopup:
 
     def _build_item_row(self, parent, item, index):
         """Builds one row for a single clipboard item."""
-        is_pinned = item.get("pinned", False)
+        # Pin state: per-profile when in a named profile, global when in General
+        if self.profiles:
+            _ap = self.profiles.get_active_profile()
+            if _ap["id"] == "general":
+                is_pinned = item.get("pinned", False)
+            else:
+                is_pinned = self.profiles.is_pinned_in_profile(item["id"], _ap["id"])
+        else:
+            is_pinned = item.get("pinned", False)
         bg = COLOURS["bg_pinned"] if is_pinned else (
             COLOURS["bg"] if index % 2 == 0 else COLOURS["bg_item"]
         )
@@ -744,15 +756,45 @@ class DropdownPopup:
             and len(_files) > 1
         )
 
-        if _is_multi:
-            # Pinned files within the group float to the top of the side panel.
-            # parent item stores a "pinned_files" list of pinned file paths.
-            _pinned_set = set(item.get("pinned_files", []))
-            _files = (
-                [f for f in _files if f in _pinned_set] +
-                [f for f in _files if f not in _pinned_set]
-            )
-            _n   = len(_files)
+        # Single folder — expand its immediate children in the side panel
+        _is_folder = (
+            item["type"] == "file"
+            and isinstance(_files, list)
+            and len(_files) == 1
+            and os.path.isdir(_files[0])
+        )
+
+        if _is_multi or _is_folder:
+            _pinned_set  = set(item.get("pinned_files",  []))
+            _deleted_set = set(item.get("deleted_files", []))
+
+            if _is_folder:
+                _folder_root = _files[0]
+                try:
+                    _children = [
+                        os.path.join(_folder_root, name)
+                        for name in os.listdir(_folder_root)
+                        if os.path.join(_folder_root, name) not in _deleted_set
+                    ]
+                    _unpinned_dirs  = sorted(
+                        [p for p in _children if os.path.isdir(p)  and p not in _pinned_set],
+                        key=lambda p: os.path.basename(p).lower())
+                    _unpinned_files = sorted(
+                        [p for p in _children if not os.path.isdir(p) and p not in _pinned_set],
+                        key=lambda p: os.path.basename(p).lower())
+                    _pinned_sorted  = sorted(
+                        [p for p in _children if p in _pinned_set],
+                        key=lambda p: os.path.basename(p).lower())
+                    _panel_files = _pinned_sorted + _unpinned_dirs + _unpinned_files
+                except (PermissionError, OSError):
+                    _panel_files = []
+            else:
+                _panel_files = (
+                    [f for f in _files if f in _pinned_set] +
+                    [f for f in _files if f not in _pinned_set]
+                )
+
+            _n   = len(_panel_files)
             _pst = {"win": None, "after_id": None, "suppress": False}   # per-row panel state
 
             PANEL_W    = 340
@@ -866,7 +908,7 @@ class DropdownPopup:
                 BADGE_X = LIST_W - 6  # badge right edge x
                 TEXT_X  = STRIP_W + 10  # filename left edge x
 
-                for _i, _fp in enumerate(_files):
+                for _i, _fp in enumerate(_panel_files):
                     _y0 = _i * (ROW_H + 1)
                     _y1 = _y0 + ROW_H
                     _cy = (_y0 + _y1) // 2
@@ -935,7 +977,7 @@ class DropdownPopup:
 
                 # Set scroll region to full content height
                 canvas.configure(
-                    scrollregion=(0, 0, LIST_W, len(_files) * (ROW_H + 1))
+                    scrollregion=(0, 0, LIST_W, len(_panel_files) * (ROW_H + 1))
                 )
 
                 # ── Single-binding hover + click (no per-row bindings) ───────
@@ -960,22 +1002,98 @@ class DropdownPopup:
                         _c.itemconfigure(f"row{_h[0]}", fill=COLOURS["bg_item"])
                     _h[0] = -1
 
-                def _on_click(e, _c=canvas, _ps=_pst):
-                    idx = _idx_at(e)
-                    if 0 <= idx < _n:
-                        try:
-                            if _ps["win"] and _ps["win"].winfo_exists():
-                                _ps["win"].destroy()
-                        except Exception:
-                            pass
-                        _ps["win"] = None
-                        _single            = dict(item)
-                        _single["content"] = [_files[idx]]
-                        self._paste_item(_single)
+                _pdrag = {"idx": -1, "x0": 0, "y0": 0, "dragging": False, "ghost": None}
 
-                canvas.bind("<Motion>",   _on_motion)
-                canvas.bind("<Leave>",    _on_leave)
-                canvas.bind("<Button-1>", _on_click)
+                def _panel_item_for(idx):
+                    _s = dict(item)
+                    _s["content"] = [_panel_files[idx]]
+                    return _s
+
+                def _on_press(e, _pd=_pdrag, _c=canvas):
+                    _pd["idx"]      = _idx_at(e)
+                    _pd["x0"]       = e.x_root
+                    _pd["y0"]       = e.y_root
+                    _pd["dragging"] = False
+                    _pd["ghost"]    = None
+
+                def _on_drag(e, _pd=_pdrag, _c=canvas):
+                    if _pd["idx"] < 0:
+                        return
+                    if not _pd["dragging"]:
+                        dx = abs(e.x_root - _pd["x0"])
+                        dy = abs(e.y_root - _pd["y0"])
+                        if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
+                            _pd["dragging"] = True
+                            # grab_set_global() captures ALL pointer events at the OS
+                            # level — including ButtonRelease over any other Win32 app.
+                            # Without this, releasing over another window means
+                            # _on_release never fires and the ghost stays on screen.
+                            try:
+                                _c.grab_set_global()
+                            except Exception:
+                                pass
+                            if 0 <= _pd["idx"] < _n:
+                                _pd["ghost"] = self._create_drag_ghost(
+                                    _panel_item_for(_pd["idx"])
+                                )
+                    if _pd["dragging"] and _pd["ghost"]:
+                        _pd["ghost"].geometry(
+                            f"+{e.x_root + 14}+{e.y_root + 14}"
+                        )
+
+                def _on_release(e, _pd=_pdrag, _c=canvas, _ps=_pst):
+                    # Release the OS-level grab first so normal events resume
+                    try:
+                        _c.grab_release()
+                    except Exception:
+                        pass
+
+                    if _pd["dragging"]:
+                        drop_x, drop_y = e.x_root, e.y_root
+                        if _pd["ghost"]:
+                            _pd["ghost"].destroy()
+                            _pd["ghost"] = None
+                        _pd["dragging"] = False
+                        idx = _pd["idx"]
+                        _pd["idx"] = -1
+                        if 0 <= idx < _n:
+                            _fi = _panel_item_for(idx)
+                            # Close side panel
+                            try:
+                                if _ps["win"] and _ps["win"].winfo_exists():
+                                    _ps["win"].destroy()
+                            except Exception:
+                                pass
+                            _ps["win"] = None
+                            # withdraw() for instant visual hide — safe inside event handler.
+                            # Defer destroy() via after(0) so handler finishes first.
+                            if self.window:
+                                try:
+                                    self.window.withdraw()
+                                except Exception:
+                                    pass
+                            self.root.after(0, self._do_hide)
+                            self.root.after(300,
+                                lambda fi=_fi, dx=drop_x, dy=drop_y:
+                                    self._do_drop(fi, dx, dy))
+                    else:
+                        # Plain click — paste
+                        idx = _pd["idx"]
+                        _pd["idx"] = -1
+                        if 0 <= idx < _n:
+                            try:
+                                if _ps["win"] and _ps["win"].winfo_exists():
+                                    _ps["win"].destroy()
+                            except Exception:
+                                pass
+                            _ps["win"] = None
+                            self._paste_item(_panel_item_for(idx))
+
+                canvas.bind("<Motion>",          _on_motion)
+                canvas.bind("<Leave>",           _on_leave)
+                canvas.bind("<ButtonPress-1>",   _on_press)
+                canvas.bind("<B1-Motion>",       _on_drag)
+                canvas.bind("<ButtonRelease-1>", _on_release)
                 canvas.bind("<MouseWheel>",
                             lambda e, c=canvas: c.yview_scroll(
                                 int(-1 * (e.delta / 120)), "units"))
@@ -986,7 +1104,7 @@ class DropdownPopup:
                     # work on that specific file, not the whole parent group.
                     _idx = _idx_at(e)
                     if 0 <= _idx < _n:
-                        _fitem = self._get_or_create_file_item(_files[_idx], item)
+                        _fitem = self._get_or_create_file_item(_panel_files[_idx], item)
                         self._show_panel_context_menu(e, item, file_item=_fitem)
                     else:
                         self._show_panel_context_menu(e, item)
@@ -1218,7 +1336,14 @@ class DropdownPopup:
                 command=lambda p=pid: self._toggle_item_in_profile(item, p)
             )
 
+        self._suppress_focus_out = True
         menu.tk_popup(event.x_root, event.y_root)
+        self._suppress_focus_out = False
+        try:
+            if self.window and self.window.winfo_exists():
+                self.window.focus_force()
+        except Exception:
+            pass
 
 
     def _toggle_item_in_profile(self, item, profile_id):
@@ -1266,24 +1391,41 @@ class DropdownPopup:
 
     def _delete_file_from_group(self, file_item, parent_item):
         """
-        Removes one file from a multi-file clipboard entry.
+        Removes one file from a multi-file group or folder panel.
 
-        - Strips the file path from the parent entry's content list.
-        - If the parent becomes empty it is fully deleted from history.
-        - Also removes the auto-created single-file history entry (file_item)
-          so it does not linger as an orphan in history or any profile.
+        Group:  strips the filepath from parent content list; deletes parent if empty.
+        Folder: adds filepath to parent's deleted_files list so it is hidden from
+                the side panel (the real file on disk is never touched).
+        Also removes the auto-created single-file history entry in both cases.
         """
         filepath = (file_item["content"][0]
                     if isinstance(file_item.get("content"), list)
                     else None)
-        if filepath:
-            still_exists = self.history.remove_file_from_item(
-                parent_item["id"], filepath
-            )
-            if not still_exists and self.profiles:
-                self.profiles.remove_item_from_all(parent_item["id"])
 
-        # Remove the auto-created single-file entry from history and profiles
+        if filepath:
+            parent_files = parent_item.get("content", [])
+            parent_is_folder = (
+                isinstance(parent_files, list)
+                and len(parent_files) == 1
+                and os.path.isdir(parent_files[0])
+            )
+
+            if parent_is_folder:
+                # Don't touch the real filesystem — just hide from the panel
+                deleted = set(parent_item.get("deleted_files", []))
+                deleted.add(filepath)
+                parent_item["deleted_files"] = list(deleted)
+                pinned = set(parent_item.get("pinned_files", []))
+                pinned.discard(filepath)
+                parent_item["pinned_files"] = list(pinned)
+                self.history._save_history()
+            else:
+                still_exists = self.history.remove_file_from_item(
+                    parent_item["id"], filepath
+                )
+                if not still_exists and self.profiles:
+                    self.profiles.remove_item_from_all(parent_item["id"])
+
         self.history.delete_item(file_item["id"])
         if self.profiles:
             self.profiles.remove_item_from_all(file_item["id"])
@@ -1307,12 +1449,21 @@ class DropdownPopup:
             filepath.encode("utf-8", errors="ignore")
         ).hexdigest()[:24]
 
-        # Return existing history entry if found
+        # Return existing history entry if found.
+        # Also ensure it is marked hidden in case it was created before this fix.
         for it in self.history.items:
             if it.get("id") == file_id:
+                if not it.get("hidden"):
+                    it["hidden"] = True
+                    self.history._save_history()
                 return it
 
-        # Not in history yet — create a lightweight single-file entry
+        # Not in history yet — create a lightweight hidden single-file entry.
+        # hidden=True keeps it out of the General view (history.get_all()
+        # filters items where hidden is True).
+        # We append to the END of history.items rather than using add_item()
+        # so it never bubbles to the top of the General list, never triggers
+        # the enforce_limit trim, and never appears as "new" to the watcher.
         new_item = {
             "id":        file_id,
             "type":      "file",
@@ -1321,8 +1472,10 @@ class DropdownPopup:
                          or parent_item.get("source", "Unknown"),
             "timestamp": parent_item.get("timestamp", ""),
             "pinned":    False,
+            "hidden":    True,
         }
-        self.history.add_item(new_item)
+        self.history.items.append(new_item)
+        self.history._save_history()
         return new_item
 
     def _show_panel_context_menu(self, event, item, file_item=None):
@@ -1405,7 +1558,14 @@ class DropdownPopup:
                 command=lambda: self._delete_item(item)
             )
 
+        self._suppress_focus_out = True
         menu.tk_popup(event.x_root, event.y_root)
+        self._suppress_focus_out = False
+        try:
+            if self.window and self.window.winfo_exists():
+                self.window.focus_force()
+        except Exception:
+            pass
 
 
     def _make_draggable(self, widget):
@@ -1853,11 +2013,24 @@ class DropdownPopup:
             if dx > DRAG_THRESHOLD or dy > DRAG_THRESHOLD:
                 self._is_dragging = True
                 self._drag_ghost  = self._create_drag_ghost(item)
+                # grab_set_global() captures ButtonRelease at the OS level —
+                # even when the mouse is released over another Win32 window.
+                # Without this, _on_item_release never fires over other apps
+                # and the paste never happens.
+                try:
+                    event.widget.grab_set_global()
+                except Exception:
+                    pass
         if self._is_dragging and self._drag_ghost:
             self._drag_ghost.geometry(f"+{event.x_root + 14}+{event.y_root + 14}")
 
 
     def _on_item_release(self, event, item):
+        # Release the OS-level grab immediately so normal events resume.
+        try:
+            event.widget.grab_release()
+        except Exception:
+            pass
         if self._is_dragging:
             drop_x, drop_y = event.x_root, event.y_root
             if self._drag_ghost:
@@ -1865,8 +2038,16 @@ class DropdownPopup:
                 self._drag_ghost = None
             self._is_dragging = False
             self._drag_item   = None
-            self.hide()
-            self.root.after(150, lambda: self._do_drop(item, drop_x, drop_y))
+            # withdraw() is safe inside an event handler — instant visual hide.
+            # Defer destroy() via after(0) so the handler finishes first,
+            # preventing silent abort of the after(300) scheduling below.
+            if self.window:
+                try:
+                    self.window.withdraw()
+                except Exception:
+                    pass
+            self.root.after(0,   self._do_hide)
+            self.root.after(300, lambda: self._do_drop(item, drop_x, drop_y))
         else:
             self._paste_item(item)
 
@@ -1976,17 +2157,48 @@ class DropdownPopup:
         pyautogui.hotkey("ctrl", "v")
         if self.watcher:
             time.sleep(0.5)
+            # Sync last_seen so the watcher ignores the clipboard content
+            # we just pasted — otherwise it would re-add the item to the top
+            # of history, making it appear as a new entry in General.
+            import hashlib as _hl
+            try:
+                if item["type"] in ("text", "url", "code", "bash"):
+                    self.watcher.last_seen = _hl.md5(
+                        item["content"].encode("utf-8")).hexdigest()
+                elif item["type"] == "file":
+                    self.watcher.last_seen = _hl.md5(
+                        str(item["content"]).encode("utf-8")).hexdigest()
+            except Exception:
+                pass
             self.watcher.paused = False
 
 
     def _toggle_pin(self, item):
-        self.history.toggle_pin(item["id"])
+        if self.profiles:
+            active = self.profiles.get_active_profile()
+            if active["id"] == "general":
+                # General: global pin — affects all views that use item["pinned"]
+                self.history.toggle_pin(item["id"])
+            else:
+                # Named profile: pin is local to this profile only
+                self.profiles.toggle_pin_in_profile(item["id"], active["id"])
+        else:
+            self.history.toggle_pin(item["id"])
         self._refresh()
 
     def _delete_item(self, item):
         if self.profiles:
-            self.profiles.remove_item_from_all(item["id"])
-        self.history.delete_item(item["id"])
+            active = self.profiles.get_active_profile()
+            if active["id"] == "general":
+                # General: permanently delete from history and all profiles
+                self.profiles.remove_item_from_all(item["id"])
+                self.history.delete_item(item["id"])
+            else:
+                # Named profile: only remove from this profile — item stays
+                # in history and in any other profile it belongs to
+                self.profiles.remove_item_from_profile(item["id"], active["id"])
+        else:
+            self.history.delete_item(item["id"])
         self._refresh()
 
     def _move_up(self, item):
@@ -2025,6 +2237,9 @@ class DropdownPopup:
         so clicking the side-panel scrollbar returned None and incorrectly
         closed the popup.
         """
+        if self._suppress_focus_out:
+            self.root.after(200, self._check_focus)
+            return
         try:
             if self.root.focus_displayof() is None:
                 self.hide()
