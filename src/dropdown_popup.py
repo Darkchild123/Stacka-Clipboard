@@ -139,6 +139,7 @@ class DropdownPopup:
         self._drag_start_x = 0
         self._drag_start_y = 0
         self._is_dragging  = False
+        self._panel_redraw = None   # callable: redraws side panel canvas in-place
 
         # Suppress focus-out hiding while a context menu is open
         self._suppress_focus_out = False
@@ -178,6 +179,7 @@ class DropdownPopup:
 
     def _do_hide(self):
         """Actually hides/destroys the popup window."""
+        self._panel_redraw = None   # invalidate stale panel reference
         if self.window:
             try:
                 self.window.destroy()
@@ -674,7 +676,9 @@ class DropdownPopup:
                 padx=5, pady=4, cursor="hand2"
             )
             btn.grid(row=r, column=c, padx=2, pady=2)
-            btn.bind("<Button-1>", lambda e, c=cmd: (c(), "break")[1])
+            btn.bind("<ButtonPress-1>",   lambda e: "break")
+            btn.bind("<Button-1>",        lambda e, c=cmd: (c(), "break")[1])
+            btn.bind("<ButtonRelease-1>", lambda e: "break")
             btn.bind("<Enter>", lambda e, b=btn: b.configure(bg=COLOURS["bg_hover"]))
             btn.bind("<Leave>", lambda e, b=btn: b.configure(bg=COLOURS["bg_item"]))
 
@@ -1037,6 +1041,56 @@ class DropdownPopup:
                 canvas.configure(
                     scrollregion=(0, 0, LIST_W, len(_panel_files) * (ROW_H + 1))
                 )
+
+                # ── Register in-place redraw so pin/delete never close the panel ──
+                def _redraw(_c=canvas, _item=item,
+                            _LW=LIST_W, _SW=STRIP_W, _BW=BADGE_W,
+                            _BX=BADGE_X, _TX=TEXT_X):
+                    _pinned2  = set(_item.get("pinned_files",  []))
+                    _deleted2 = set(_item.get("deleted_files", []))
+                    _files2   = parent_item.get("content", []) if not _is_folder else _panel_files
+                    # Recompute panel_files respecting deletions
+                    _pf2 = [f for f in _panel_files if f not in _deleted2]
+                    _n2  = len(_pf2)
+                    _c.delete("all")
+                    for _i2, _fp2 in enumerate(_pf2):
+                        _y0 = _i2 * (ROW_H + 1)
+                        _y1 = _y0 + ROW_H
+                        _cy = (_y0 + _y1) // 2
+                        _isd = os.path.isdir(_fp2)
+                        _c.create_rectangle(0, _y0, _LW, _y1,
+                            fill=COLOURS["bg_item"], outline="",
+                            tags=(f"row{_i2}", "allrows"))
+                        _sc = (COLOURS["pin"] if _fp2 in _pinned2
+                               else TYPE_COLOURS.get(
+                                   "folder" if _isd else "file", COLOURS["accent"]))
+                        _c.create_rectangle(0, _y0, _SW, _y1,
+                            fill=_sc, outline="", tags=(f"strip{_i2}",))
+                        _bx1 = _BX - _BW
+                        _c.create_rectangle(_bx1, _y0+8, _BX, _y1-8,
+                            fill=COLOURS["accent"], outline="",
+                            tags=(f"badge{_i2}",))
+                        _raw2  = "" if _isd else os.path.splitext(_fp2)[1]
+                        _ext2  = "dir" if _isd else (_raw2[1:].lower() if _raw2 else "file")
+                        _c.create_text((_bx1+_BX)//2, _cy,
+                            text=_ext2, fill="white",
+                            font=("Segoe UI", 7, "bold"),
+                            tags=(f"btxt{_i2}",))
+                        _c.create_text(_TX, _cy,
+                            text=os.path.basename(_fp2),
+                            fill=COLOURS["text"], font=("Segoe UI", 8),
+                            anchor="w", width=_bx1-_TX-4,
+                            tags=(f"name{_i2}", "allnames"))
+                        if _fp2 in _pinned2:
+                            _c.create_text(_bx1-8, _cy, text="📌",
+                                fill=COLOURS["danger"],
+                                font=("Segoe UI", 10, "bold"), anchor="e",
+                                tags=(f"pin{_i2}",))
+                        _c.create_line(0, _y1, _LW, _y1,
+                            fill=COLOURS["border"], tags=(f"sep{_i2}",))
+                    _c.configure(scrollregion=(0, 0, _LW, _n2 * (ROW_H + 1)))
+
+                self._panel_redraw = _redraw
 
                 # ── Single-binding hover + click (no per-row bindings) ───────
                 _hov_idx = [-1]   # mutable so closures can update it
@@ -1445,7 +1499,7 @@ class DropdownPopup:
         parent_item["pinned_files"] = list(pinned)
         # Persist the change — history_manager._save_history writes items to disk
         self.history._save_history()
-        self._refresh()
+        self._redraw_panel()
 
     def _delete_file_from_group(self, file_item, parent_item):
         """
@@ -1488,7 +1542,7 @@ class DropdownPopup:
         if self.profiles:
             self.profiles.remove_item_from_all(file_item["id"])
 
-        self._refresh()
+        self._redraw_panel()
 
     def _get_or_create_file_item(self, filepath, parent_item):
         """
@@ -2231,6 +2285,38 @@ class DropdownPopup:
             self.watcher.paused = False
 
 
+    def _redraw_panel(self):
+        """Redraws the side panel canvas in-place — no panel close, no flicker."""
+        if self._panel_redraw:
+            try:
+                self._panel_redraw()
+                return
+            except Exception:
+                pass
+        # Fallback: full refresh
+        self._refresh()
+
+    def _refresh(self):
+        """Rebuilds the popup at its current screen position — no flicker.
+        Uses withdraw/rebuild/deiconify so the window never moves."""
+        if self.window:
+            try:
+                x = self.window.winfo_x()
+                y = self.window.winfo_y()
+            except Exception:
+                return
+            self._build_and_show(x, y)
+
+    def _move_up(self, item):
+        """Moves item one position up in history then refreshes."""
+        self.history.move_up(item["id"])
+        self._refresh()
+
+    def _move_down(self, item):
+        """Moves item one position down in history then refreshes."""
+        self.history.move_down(item["id"])
+        self._refresh()
+
     def _toggle_pin(self, item):
         if self.profiles:
             active = self.profiles.get_active_profile()
@@ -2248,11 +2334,25 @@ class DropdownPopup:
         if self.profiles:
             active = self.profiles.get_active_profile()
             if active["id"] == "general":
-                # General: permanently remove from history and all profiles
-                self.profiles.remove_item_from_all(item["id"])
-                self.history.delete_item(item["id"])
+                # Only permanently delete if item is not in any named profile
+                in_named = any(
+                    item["id"] in p.get("item_ids", [])
+                    for p in self.profiles.get_all_profiles()
+                    if not p.get("built_in")
+                )
+                if in_named:
+                    # Hide from General only — item stays in named profiles
+                    for it in self.history.items:
+                        if it["id"] == item["id"]:
+                            it["hidden"] = True
+                            self.history._save_history()
+                            break
+                else:
+                    # Not in any named profile — permanently delete
+                    self.profiles.remove_item_from_all(item["id"])
+                    self.history.delete_item(item["id"])
             else:
-                # Named profile: remove only from this profile
+                # Named profile: remove from this profile only
                 self.profiles.remove_item_from_profile(item["id"], active["id"])
         else:
             self.history.delete_item(item["id"])
