@@ -382,3 +382,52 @@ ClipDrop is being built by **Cosmas** as a first software development project �
 ---
 
 *Built with passion. Designed for simplicity.*
+
+---
+
+### 🔧 Migration — tkinter → PyQt6 (May 2026)
+
+**Status:** ✅ Complete
+
+#### What changed
+
+All UI files were rewritten from tkinter to PyQt6. Business logic files were not touched.
+
+| File | Before | After |
+|---|---|---|
+| `src/main.py` | `tk.Tk()` + `root.mainloop()` | `QApplication` + `app.exec()` |
+| `src/dropdown_popup.py` | tkinter `Toplevel` + `Canvas` | `QWidget` + `QListWidget` |
+| `src/context_menu.py` | tkinter `Toplevel` overlay | `QWidget` overlay + Qt signals |
+| `src/tray_icon.py` | `pystray` library | `QSystemTrayIcon` |
+| `src/settings_panel.py` | tkinter `Toplevel` | `QDialog` |
+
+Files left untouched: `clipboard_watcher.py`, `history_manager.py`, `profile_manager.py`.
+
+#### Why tkinter was replaced
+
+After extensive development, several bugs proved impossible to fix without changing the framework:
+
+**Side panel had no real-time updates.** Pin and delete actions in the multi-file side panel did not update visually without closing and reopening the panel. Every attempted fix — canvas `delete("all")` + redraw, closure-captured rebuild functions, instance-level panel tracking — either failed silently or introduced new regressions.
+
+**Popup flickered on every interaction.** `_refresh()` had to destroy and rebuild the entire popup window to reflect any data change (pin, delete, move). This caused visible flicker on every user action.
+
+**Event propagation bugs.** `<ButtonRelease-1>` events bubbled from pin/delete buttons up to the row, triggering unintended paste actions. Requires manual `"break"` returns on every binding — fragile and kept regressing.
+
+**Threading constraints.** tkinter is single-threaded. All UI updates must be marshalled through `root.after()`, making real-time updates from the clipboard watcher thread unnecessarily complex and error-prone.
+
+**Focus and borderless window issues.** `overrideredirect` popup windows on Windows have unreliable focus and event routing, requiring increasingly complex workarounds that kept breaking across different scenarios.
+
+The root cause of all these issues is architectural: tkinter has no concept of partial widget updates. To reflect any structural change (reordering, deletion) you must either rebuild the entire widget tree — causing flicker — or use canvas `itemconfigure` — which only works for visual properties, not structure. Neither approach was sufficient.
+
+#### Why PyQt6 was chosen
+
+PyQt6 solves every one of these issues natively:
+
+- **Real-time list updates** — `QListWidget` updates individual rows in-place via signals. No destroy/rebuild ever needed.
+- **Clean event model** — signals and slots replace tkinter's fragile binding system. Event propagation is explicit and reliable.
+- **Thread-safe signals** — the clipboard watcher can emit signals from its own thread; Qt automatically marshals them to the UI thread.
+- **Native Windows integration** — `QSystemTrayIcon`, `QMenu`, clipboard API, hotkey registration all built-in.
+- **Borderless windows** — `Qt.FramelessWindowHint` works correctly on Windows without the focus issues of `overrideredirect`.
+
+PyQt6 was chosen over alternatives (Dear PyGui, Flet, Kivy, wxPython) because ClipDrop is a Windows OS utility that requires deep native integration — system tray, clipboard API, global hotkeys, and borderless cursor-positioned windows — all of which PyQt6 handles natively.
+

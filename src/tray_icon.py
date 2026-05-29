@@ -1,185 +1,145 @@
 # ============================================================
-# ClipDrop - tray_icon.py
+# ClipDrop - tray_icon.py  (PyQt6 rewrite)
 # ============================================================
-# This file creates and manages the ClipDrop system tray icon.
-# It sits in the bottom-right corner of Windows (the taskbar tray)
-# and gives the user quick access to settings and controls.
+# System tray icon using QSystemTrayIcon.
+# Gives the user quick access to settings and controls
+# from the Windows taskbar notification area.
 # ============================================================
 
-import pystray
-from pystray import MenuItem as item
-from PIL import Image, ImageDraw
-import threading
 import os
 import sys
+import threading
 
+from PIL import Image, ImageDraw
 
-# Path to the icon file in the assets folder
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
+from PyQt6.QtGui     import QIcon, QPixmap, QImage, QAction
+from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject
+
+BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
+
+
+def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
+    img  = pil_img.convert("RGBA")
+    data = img.tobytes("raw", "RGBA")
+    qimg = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimg)
 
 
 class TrayIcon:
 
-    def __init__(self, history_manager, profile_manager, root):
-        # Store the history manager so we can call clear_all() from the tray
+    def __init__(self, history_manager, profile_manager, root=None):
         self.history  = history_manager
         self.profiles = profile_manager
-
-        # The shared tkinter root — used to safely schedule UI actions
-        self.root = root
-
-        # settings_panel will be imported here when needed
-        # (we import it late to avoid circular imports)
-        self.settings_window = None
-
-        # Load or generate the tray icon image
-        self.icon_image = self._load_icon()
-
-        # Build the right-click menu for the tray icon.
-        # The Switch Profile submenu is generated dynamically so it always
-        # reflects the current list of profiles.
-        self.menu = pystray.Menu(
-            item("ClipDrop", self._do_nothing, enabled=False),
-            pystray.Menu.SEPARATOR,
-            item(self._active_profile_label, self._do_nothing, enabled=False),
-            pystray.Menu.SEPARATOR,
-            item("⚙  Settings", self._open_settings, default=True),
-            item("🧹 Clear History", self._clear_history),
-            pystray.Menu.SEPARATOR,
-            item("✖  Quit ClipDrop", self._quit),
-        )
-
-        # Create the tray icon object
-        self.tray = pystray.Icon(
-            name="ClipDrop",
-            icon=self.icon_image,
-            title="ClipDrop",   # Tooltip shown when hovering over the icon
-            menu=self.menu
-        )
-
+        # root is unused in Qt but kept for API compatibility
+        self._tray      = None
+        self._icon_img  = self._load_icon()
 
     def start(self):
-        """
-        Starts the tray icon and keeps the app running.
-        This is a blocking call — the app stays alive here
-        until the user clicks Quit from the tray menu.
-        """
-        print("Tray icon started. ClipDrop is running.")
-        self.tray.run()  # This blocks until quit is called
-
+        """Called from the main thread — creates the tray icon immediately."""
+        self._create_tray()
+        print("Tray icon started.")
 
     def stop(self):
-        """Stops the tray icon and exits the app."""
-        self.tray.stop()
+        if self._tray:
+            self._tray.hide()
 
+    # ── Create tray ──────────────────────────────────────────────────────────
 
-    # ============================================================
-    # MENU ACTIONS
-    # ============================================================
+    def _create_tray(self):
+        pixmap = _pil_to_qpixmap(self._icon_img)
+        icon   = QIcon(pixmap)
 
-    def _active_profile_label(self, item):
-        """
-        Returns the active profile name for display in the tray menu.
-        Called dynamically by pystray each time the menu opens,
-        so it always shows the current profile.
-        """
+        self._tray = QSystemTrayIcon(icon)
+        self._tray.setToolTip("ClipDrop")
+        self._tray.activated.connect(self._on_tray_activated)
+
+        menu = QMenu()
+        menu.setStyleSheet("""
+            QMenu { background:#1e1e2e; color:#e2e8f0; font-family:'Segoe UI';
+                    font-size:9pt; border:1px solid #3f3f5f; }
+            QMenu::item:selected { background:#4c4c8a; }
+        """)
+
+        # Header (disabled label)
+        header = menu.addAction("ClipDrop")
+        header.setEnabled(False)
+        menu.addSeparator()
+
+        # Active profile (dynamic, refreshed on open)
+        self._profile_action = menu.addAction(self._profile_label())
+        self._profile_action.setEnabled(False)
+        menu.addSeparator()
+
+        settings_act = menu.addAction("⚙  Settings")
+        settings_act.triggered.connect(self._open_settings)
+
+        clear_act = menu.addAction("🧹 Clear History")
+        clear_act.triggered.connect(self._clear_history)
+        menu.addSeparator()
+
+        quit_act = menu.addAction("✖  Quit ClipDrop")
+        quit_act.triggered.connect(self._quit)
+
+        # Refresh profile label each time menu opens
+        menu.aboutToShow.connect(self._refresh_profile_action)
+
+        self._tray.setContextMenu(menu)
+        self._tray.show()
+
+    def _profile_label(self) -> str:
         try:
-            name = self.profiles.get_active_profile()["name"]
-            return f"Profile: {name}"
+            return f"Profile: {self.profiles.get_active_profile()['name']}"
         except Exception:
             return "Profile: General"
 
+    def _refresh_profile_action(self):
+        if self._profile_action:
+            self._profile_action.setText(self._profile_label())
 
-    def _open_settings(self, icon, menu_item):
-        """
-        Opens the Settings panel on the main tkinter thread.
-        Toplevel windows must be created on the same thread as tk.Tk().
-        """
-        def open_on_main():
-            from settings_panel import SettingsPanel
-            panel = SettingsPanel(self.history, self.profiles, tk_root=self.root)
-            panel.show()
+    # ── Tray activated ───────────────────────────────────────────────────────
 
-        self.root.after(0, open_on_main)
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._open_settings()
 
+    # ── Menu actions ─────────────────────────────────────────────────────────
 
-    def _clear_history(self, icon, menu_item):
-        """
-        Clears all clipboard history when the user clicks
-        'Clear History' in the tray menu.
-        """
+    def _open_settings(self):
+        from settings_panel import SettingsPanel
+        panel = SettingsPanel(self.history, self.profiles)
+        panel.show()
+
+    def _clear_history(self):
         self.history.clear_all()
         print("History cleared from tray menu.")
+        if self._tray:
+            self._tray.showMessage(
+                "ClipDrop",
+                "Clipboard history has been cleared.",
+                QSystemTrayIcon.MessageIcon.Information,
+                2000
+            )
 
-        # Show a brief notification in the tray
-        self.tray.notify(
-            title="ClipDrop",
-            message="Clipboard history has been cleared."
-        )
-
-
-    def _quit(self, icon, menu_item):
-        """
-        Cleanly quits ClipDrop when the user clicks 'Quit'.
-        Stops the tray icon and destroys the tkinter root.
-        """
+    def _quit(self):
         print("Quitting ClipDrop...")
-        self.tray.stop()
-        self.root.after(0, self.root.destroy)
+        if self._tray:
+            self._tray.hide()
+        QApplication.quit()
 
+    # ── Icon loading ─────────────────────────────────────────────────────────
 
-    def _do_nothing(self, icon, menu_item):
-        """
-        A placeholder action for non-clickable menu items
-        like the app name header at the top of the menu.
-        """
-        pass
-
-
-    # ============================================================
-    # ICON LOADING
-    # ============================================================
-
-    def _load_icon(self):
-        """
-        Loads the ClipDrop icon from the assets folder.
-        If no icon file is found, it generates a simple
-        placeholder icon automatically so the app still works.
-        """
+    def _load_icon(self) -> Image.Image:
         if os.path.exists(ICON_PATH):
-            # Load the real icon from assets/icon.png
             return Image.open(ICON_PATH)
-        else:
-            # No icon file found — generate a simple one
-            print("No icon found in assets/. Using generated placeholder icon.")
-            return self._generate_placeholder_icon()
+        print("No icon found in assets/. Using generated placeholder.")
+        return self._generate_placeholder_icon()
 
-
-    def _generate_placeholder_icon(self):
-        """
-        Generates a simple clipboard-shaped icon as a placeholder.
-        This is used when no icon.png exists in the assets folder.
-        It draws a blue square with the letters 'CD' on it.
-        """
-        # Create a 64x64 pixel image with a blue background
-        size = 64
-        image = Image.new("RGBA", (size, size), color=(0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-
-        # Draw a rounded blue rectangle as the background
-        draw.rounded_rectangle(
-            [4, 4, size - 4, size - 4],
-            radius=12,
-            fill=(79, 70, 229)  # Indigo/purple colour
-        )
-
-        # Draw the letters "CD" in white in the centre
-        draw.text(
-            (size // 2, size // 2),
-            "CD",
-            fill=(255, 255, 255),
-            anchor="mm"  # Centre the text
-        )
-
+    def _generate_placeholder_icon(self) -> Image.Image:
+        size  = 64
+        image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        draw  = ImageDraw.Draw(image)
+        draw.rounded_rectangle([4, 4, size-4, size-4], radius=12, fill=(79, 70, 229))
+        draw.text((size//2, size//2), "CD", fill=(255,255,255), anchor="mm")
         return image

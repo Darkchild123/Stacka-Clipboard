@@ -3,29 +3,28 @@
 # ============================================================
 # App entry point. Starts all components in the correct order.
 #
-# tkinter owns the main thread via root.mainloop().
-# All other components run on background daemon threads.
-# Each thread is wrapped in crash protection so one failure
-# never takes down the entire app.
+# PyQt6 owns the main thread via app.exec().
+# Background-only components (clipboard watcher, mouse hook,
+# signal file watcher) run on daemon threads.
+# UI components are created on the main thread.
 # ============================================================
 
 import threading
 import sys
-import tkinter as tk
+
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore    import Qt
+
 from clipboard_watcher import ClipboardWatcher
-from history_manager import HistoryManager
-from profile_manager import ProfileManager
-from tray_icon import TrayIcon
-from context_menu import ContextMenu
-from dropdown_popup import DropdownPopup
+from history_manager   import HistoryManager
+from profile_manager   import ProfileManager
+from tray_icon         import TrayIcon
+from context_menu      import ContextMenu
+from dropdown_popup    import DropdownPopup
 
 
 def protected_thread(name, target, *args, **kwargs):
-    """
-    Wraps a function in a background thread with crash protection.
-    If the function crashes, it prints the error and keeps the app alive
-    instead of silently killing the whole process.
-    """
+    """Wraps a function in a background daemon thread with crash protection."""
     def safe_run():
         try:
             target(*args, **kwargs)
@@ -43,52 +42,48 @@ def protected_thread(name, target, *args, **kwargs):
 def main():
     print("ClipDrop is starting...")
 
-    # Step 1: Create the tkinter root window
-    # MUST happen on the main thread before anything else.
-    root = tk.Tk()
-    root.withdraw()  # Hide immediately — it is the engine, not a visible window
+    # Step 1: QApplication — must exist before any QWidget is created
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)   # keep running after popup closes
 
-    # Catch any unhandled tkinter errors so they don't kill the app
-    def handle_tk_error(exc, val, tb):
-        import traceback
-        print(f"[tkinter error] {val}")
-        traceback.print_exception(exc, val, tb)
-
-    root.report_callback_exception = handle_tk_error
-
-    # Step 2: History Manager — loads saved clipboard data from disk
+    # Step 2: History Manager
     history = HistoryManager()
 
-    # Step 3: Profile Manager — loads saved profiles from disk
+    # Step 3: Profile Manager
     profiles = ProfileManager(history)
 
-    # Step 4: Clipboard Watcher — monitors copy events in background
+    # Step 4: Clipboard Watcher — purely background, safe to thread
     watcher = ClipboardWatcher(history)
     protected_thread("ClipboardWatcher", watcher.start)
 
-    # Step 5: Dropdown Popup — the visual clipboard list
-    popup = DropdownPopup(root, history, watcher, profiles)
+    # Step 5: Dropdown Popup — QObject lives on main thread
+    popup = DropdownPopup(history_manager=history, watcher=watcher,
+                          profile_manager=profiles)
 
-    # Step 6: Context Menu — right-click integration and hotkey
-    context = ContextMenu(history, popup, root)
-    protected_thread("ContextMenu", context.setup)
+    # Step 6: Context Menu — setup() starts its own internal daemon threads
+    # for mouse hook and signal file watcher; the call itself returns quickly.
+    # MUST be called on the main thread so QTimer / QWidget creation works.
+    context = ContextMenu(history, popup)
+    context.setup()
 
-    # Step 7: Tray Icon — system tray icon and menu
-    tray = TrayIcon(history, profiles, root)
-    protected_thread("TrayIcon", tray.start)
+    # Step 7: Tray Icon — start() schedules tray creation via QTimer;
+    # must be called on the main thread.
+    tray = TrayIcon(history, profiles)
+    tray.start()
 
     print("ClipDrop is running.")
-    print("  Right-click anywhere → '📋 Paste from ClipDrop' button appears")
+    print("  Right-click anywhere → 'Paste from ClipDrop'")
     print("  Or press Ctrl+Shift+V from any app")
 
-    # Step 7: tkinter main loop — keeps the app alive
-    # Runs until root.destroy() is called (user clicks Quit)
     try:
-        root.mainloop()
+        sys.exit(app.exec())
     except KeyboardInterrupt:
         print("ClipDrop interrupted.")
     finally:
-        context.teardown()
+        try:
+            context.teardown()
+        except Exception:
+            pass
         print("ClipDrop closed.")
 
 

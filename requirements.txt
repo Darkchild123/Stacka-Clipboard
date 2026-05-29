@@ -1,24 +1,21 @@
 # ============================================================
 # ClipDrop - requirements.txt
 # ============================================================
-# This file lists all the external Python libraries that
-# ClipDrop needs to run.
+# All external Python libraries ClipDrop needs to run.
 #
-# To install everything at once, open Command Prompt inside
-# the Project ClipDrop folder and run:
-#
+# Install everything at once:
 #   pip install -r requirements.txt
 #
 # ============================================================
+
+# UI framework — replaces tkinter and pystray (May 2026 migration)
+PyQt6==6.7.0
 
 # Windows clipboard and system access
 pywin32==306
 
 # Image handling — opening, saving, resizing, thumbnails
 Pillow==10.3.0
-
-# System tray icon
-pystray==0.19.5
 
 # Mouse position, simulating keyboard shortcuts (Ctrl+V)
 pyautogui==0.9.54
