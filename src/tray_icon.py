@@ -33,8 +33,9 @@ class TrayIcon:
         self.history  = history_manager
         self.profiles = profile_manager
         # root is unused in Qt but kept for API compatibility
-        self._tray      = None
-        self._icon_img  = self._load_icon()
+        self._tray         = None
+        self._icon_img     = self._load_icon()
+        self._settings_win = None   # keep reference — prevents GC crash
 
     def start(self):
         """Called from the main thread — creates the tray icon immediately."""
@@ -108,8 +109,14 @@ class TrayIcon:
 
     def _open_settings(self):
         from settings_panel import SettingsPanel
-        panel = SettingsPanel(self.history, self.profiles)
-        panel.show()
+        # Store on self — prevents Python GC from destroying the panel while
+        # it is still open, which would crash on any user interaction.
+        if self._settings_win and self._settings_win.isVisible():
+            self._settings_win.raise_()
+            self._settings_win.activateWindow()
+            return
+        self._settings_win = SettingsPanel(self.history, self.profiles)
+        self._settings_win.show()
 
     def _clear_history(self):
         self.history.clear_all()

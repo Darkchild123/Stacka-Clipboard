@@ -29,7 +29,8 @@ desktop.ini
 # ClipDrop app data (local user data, not for version control)
 data/*.json
 data/*.db
-settings/*.json
+data/
+settings/
 
 # Logs
 *.log

@@ -59,6 +59,9 @@ def main():
     # Step 5: Dropdown Popup — QObject lives on main thread
     popup = DropdownPopup(history_manager=history, watcher=watcher,
                           profile_manager=profiles)
+    # Expose app-wide so the settings panel can live-apply theme /
+    # transparency changes to an open popup.
+    app.setProperty("clipdrop_popup", popup)
 
     # Step 6: Context Menu — setup() starts its own internal daemon threads
     # for mouse hook and signal file watcher; the call itself returns quickly.
@@ -70,6 +73,9 @@ def main():
     # must be called on the main thread.
     tray = TrayIcon(history, profiles)
     tray.start()
+    # Expose the tray app-wide so DropdownPopup._show_toast can post
+    # balloon notifications without a circular import.
+    app.setProperty("clipdrop_tray", tray)
 
     print("ClipDrop is running.")
     print("  Right-click anywhere → 'Paste from ClipDrop'")

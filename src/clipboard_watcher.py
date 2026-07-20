@@ -19,6 +19,11 @@ import hashlib
 # Matches text that is entirely a single URL (http, https, or bare www.)
 _URL_RE = re.compile(r'^(https?://|www\.)[^\s]{4,}$', re.IGNORECASE)
 
+# Matches a hex colour code: #RGB, #RGBA, #RRGGBB or #RRGGBBAA.
+# The leading '#' is REQUIRED — without it ordinary words made entirely
+# of hex letters ("decade", "cafe", "added") would false-positive.
+_HEX_RE = re.compile(r'^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$')
+
 
 class ClipboardWatcher:
 
@@ -145,8 +150,9 @@ class ClipboardWatcher:
 
     def _classify_text(self, text):
         """
-        Classifies copied text into one of four types:
+        Classifies copied text into one of five types:
           "url"  — entire text is a single URL
+          "hex"  — a hex colour code (#FF5733, #0af, …)
           "bash" — shell/terminal commands
           "code" — programming code (any language)
           "text" — plain human-readable text (default)
@@ -156,6 +162,8 @@ class ClipboardWatcher:
             return "text"
         if _URL_RE.match(stripped):
             return "url"
+        if _HEX_RE.match(stripped):
+            return "hex"
         if self._is_bash(stripped):
             return "bash"
         if self._is_code(stripped):

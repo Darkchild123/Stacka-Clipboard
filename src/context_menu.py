@@ -106,8 +106,14 @@ class OverlayButton(QWidget):
 
     def show_at(self, x: int, y: int, menu_rect):
         self._timer.stop()
-        self.adjustSize()
-        w = self.width(); h = self.height()
+        # sizeHint() asks the layout for its required size without needing
+        # the widget to have been shown before — equivalent to tkinter's
+        # winfo_reqwidth(). Using width()/height() on an unshown widget
+        # returns 0 and breaks all positioning calculations.
+        self.ensurePolished()
+        hint = self.sizeHint()
+        w = hint.width()  if hint.width()  > 0 else 200
+        h = hint.height() if hint.height() > 0 else 40
         screen = QApplication.primaryScreen().geometry()
         sw, sh = screen.width(), screen.height()
 
@@ -275,11 +281,24 @@ class ContextMenu:
         if not win or not win.isVisible():
             return
         try:
-            gx, gy = win.x(), win.y()
-            gw, gh = win.width(), win.height()
-            inside = (gx <= click_x <= gx+gw and gy <= click_y <= gy+gh)
-            if not inside:
-                self.popup.hide()
+            # Use Windows API to find which window was clicked.
+            # The mouse hook gives raw physical pixel coordinates; Qt's
+            # win.x()/win.y() are logical coordinates that don't match on
+            # HiDPI screens. WindowFromPoint works in physical pixels — the
+            # same space as the hook — so it's always accurate regardless of DPI.
+            #
+            # ClipDrop UI spans MANY top-level windows: the main popup, the
+            # file side panel, right-click QMenus ("Send to profile…"), the
+            # profile-switcher QMenu… Enumerating them individually kept
+            # missing one (side panel, then menus — each a "popup closes
+            # unexpectedly" bug). The robust test: if the clicked window
+            # belongs to THIS PROCESS, it is ClipDrop UI — never hide.
+            clicked_hwnd = win32gui.WindowFromPoint((click_x, click_y))
+            if clicked_hwnd:
+                _tid, pid = win32process.GetWindowThreadProcessId(clicked_hwnd)
+                if pid == os.getpid():
+                    return  # Click is inside ClipDrop UI — do not hide
+            self.popup.hide()
         except Exception:
             pass
 

@@ -8,13 +8,13 @@
 import webbrowser
 
 from PyQt6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider,
     QListWidget, QListWidgetItem, QFrame,
-    QInputDialog, QMessageBox, QApplication,
+    QInputDialog, QMessageBox, QApplication, QScrollArea,
 )
-from PyQt6.QtCore    import Qt, QTimer
-from PyQt6.QtGui     import QFont, QIntValidator
+from PyQt6.QtCore    import Qt, QTimer, QEvent
+from PyQt6.QtGui     import QFont, QIntValidator, QCursor
 
 APP_NAME    = "ClipDrop"
 APP_VERSION = "1.0.0"
@@ -58,10 +58,20 @@ def _btn_style(bg: str, hover: str, fg: str = "white") -> str:
             f"QPushButton:hover {{background:{hover};}}")
 
 
-class SettingsPanel(QDialog):
+class SettingsPanel(QWidget):
+    """Settings panel.
+
+    Uses QWidget (not QDialog) so there is no built-in accept/reject/
+    Enter-to-close behaviour. A global event filter provides click-outside-
+    to-close so the panel feels like a lightweight floating panel.
+    """
 
     def __init__(self, history_manager, profile_manager=None, parent=None):
-        super().__init__(parent, Qt.WindowType.WindowStaysOnTopHint)
+        super().__init__(parent,
+                         Qt.WindowType.Window |
+                         Qt.WindowType.WindowStaysOnTopHint |
+                         Qt.WindowType.WindowMinimizeButtonHint |
+                         Qt.WindowType.WindowCloseButtonHint)
         self.history  = history_manager
         self.profiles = profile_manager
         self._theme   = history_manager.settings.get("theme", "dark")
@@ -73,13 +83,53 @@ class SettingsPanel(QDialog):
 
         self._build()
 
-        # Centre on screen at 68%, 15%
-        screen = QApplication.primaryScreen().geometry()
-        self.move(int(screen.width()*0.68), int(screen.height()*0.15))
+        # Centre cleanly on the screen the cursor is on.
+        # adjustSize() first so frameGeometry() reflects the real size of
+        # the built layout, then moveCenter() — the standard Qt centring
+        # pattern. availableGeometry() excludes the taskbar.
+        self.adjustSize()
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        fg = self.frameGeometry()
+        fg.moveCenter(screen.availableGeometry().center())
+        self.move(fg.topLeft())
+
+        # Install global event filter for click-outside-to-close
+        QApplication.instance().installEventFilter(self)
+
+    # ── Click-outside-to-close ────────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        # A minimized window is still isVisible() in Qt terms — clicking
+        # another ClipDrop window must not close a minimized settings panel.
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and self.isVisible() and not self.isMinimized()):
+            try:
+                gpos = event.globalPosition().toPoint()
+                # Check this window and all its child widgets
+                if not self.geometry().contains(gpos):
+                    # Allow clicks on QMessageBox / QInputDialog (they are
+                    # separate windows — their geometry won't match ours, but
+                    # they are children of this panel logically)
+                    focused = QApplication.activeWindow()
+                    if focused is not None and focused is not self:
+                        # A child dialog (QMessageBox etc.) is active — don't close
+                        return False
+                    self.close()
+            except Exception:
+                pass
+        return False   # never consume the event
+
+    def closeEvent(self, event):
+        # Remove the global event filter when the panel closes
+        try:
+            QApplication.instance().removeEventFilter(self)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     def _build(self):
         C = self.C
-        self.setStyleSheet(f"QDialog {{background:{C['bg']};}} "
+        self.setStyleSheet(f"QWidget {{background:{C['bg']};}} "
                            f"QLabel {{color:{C['text']};background:transparent;}}")
 
         main = QVBoxLayout(self)
@@ -94,7 +144,8 @@ class SettingsPanel(QDialog):
         hdr.setStyleSheet(f"background:{C['accent']};color:white;")
         main.addWidget(hdr)
 
-        # Scroll area
+        # Scrollable content — the window stays compact; sections that
+        # don't fit are reached by scrolling.
         scroll_w = QWidget()
         scroll_w.setStyleSheet(f"background:{C['bg']};")
         scroll_lay = QVBoxLayout(scroll_w)
@@ -102,6 +153,8 @@ class SettingsPanel(QDialog):
         scroll_lay.setSpacing(0)
 
         scroll_lay.addWidget(self._section_appearance())
+        scroll_lay.addWidget(self._divider())
+        scroll_lay.addWidget(self._section_behaviour())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_history())
         if self.profiles:
@@ -111,7 +164,20 @@ class SettingsPanel(QDialog):
         scroll_lay.addWidget(self._section_info())
         scroll_lay.addStretch()
 
-        main.addWidget(scroll_w)
+        scroll = QScrollArea(self)
+        scroll.setWidget(scroll_w)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{background:{C['bg']};border:none;}}
+            QScrollBar:vertical {{background:{C['bg']};width:8px;margin:0;}}
+            QScrollBar::handle:vertical {{background:{C['border']};
+                border-radius:4px;min-height:24px;}}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{height:0;}}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{background:none;}}
+        """)
+        main.addWidget(scroll, 1)
 
         # Footer close button
         footer = QWidget(self)
@@ -126,6 +192,9 @@ class SettingsPanel(QDialog):
         fl.addWidget(close_btn)
         fl.addStretch()
         main.addWidget(footer)
+
+        # Compact window: header + ~2 sections visible, rest scrolls.
+        self.setFixedHeight(520)
 
     def _divider(self) -> QFrame:
         line = QFrame(self)
@@ -185,6 +254,55 @@ class SettingsPanel(QDialog):
         sr.addStretch()
         lay.addWidget(slider_row)
         return w
+
+    def _section_behaviour(self) -> QWidget:
+        C = self.C
+        w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
+
+        lay.addWidget(self._heading("🪟  Close behaviour"))
+        self._close_mode = self.history.settings.get("close_mode", "click")
+
+        def option_row(label, mode, caption):
+            row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+            btn = QPushButton(label, row)
+            btn.setFixedWidth(140)
+            btn.clicked.connect(lambda _=False, m=mode: self._set_close_mode(m))
+            rl.addWidget(btn)
+            cap = QLabel(caption, row)
+            cap.setWordWrap(True)
+            cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+            rl.addWidget(cap, 1)
+            return row, btn
+
+        r1, self._click_close_btn = option_row(
+            "🖱  Click to close", "click",
+            "Click anywhere outside the app window and it closes.")
+        r2, self._hover_close_btn = option_row(
+            "👆  Hover to close", "hover",
+            "Hover outside the app window automatically closes it.")
+        lay.addWidget(r1)
+        lay.addWidget(r2)
+        self._refresh_close_mode_buttons()
+        return w
+
+    def _refresh_close_mode_buttons(self):
+        C = self.C
+        active   = _btn_style(C["accent"], C["accent_hover"])
+        inactive = _btn_style(C["bg_section"], C["accent"], C["text_dim"])
+        self._click_close_btn.setStyleSheet(
+            active if self._close_mode == "click" else inactive)
+        self._hover_close_btn.setStyleSheet(
+            active if self._close_mode == "hover" else inactive)
+
+    def _set_close_mode(self, mode: str):
+        if mode == self._close_mode:
+            return
+        self._close_mode = mode
+        self.history.save_setting("close_mode", mode)
+        self._refresh_close_mode_buttons()
+        self._apply_to_app()   # open popup re-evaluates its close mode
 
     def _section_history(self) -> QWidget:
         C = self.C
@@ -267,15 +385,21 @@ class SettingsPanel(QDialog):
             return rw
 
         lay.addWidget(btn_row([
-            ("＋ New",    self._new_profile,    False),
-            ("✎ Rename",  self._rename_profile, False),
-            ("✕ Delete",  self._delete_profile, False),
+            ("✔ Switch To", self._switch_profile,  False),
+            ("＋ New",      self._new_profile,    False),
+            ("✎ Rename",    self._rename_profile, False),
+            ("✕ Delete",    self._delete_profile, False),
         ]))
         lay.addWidget(btn_row([
             ("↑ Move Up",   self._move_profile_up,        False),
             ("↓ Move Down", self._move_profile_down,      False),
             ("🧹 Clear",    self._clear_selected_profile, True),
         ]))
+
+        # Double-click also switches profile
+        self._profile_list.itemDoubleClicked.connect(
+            lambda _: self._switch_profile()
+        )
         return w
 
     def _section_info(self) -> QWidget:
@@ -330,10 +454,44 @@ class SettingsPanel(QDialog):
             self._light_btn.setStyleSheet(active)
 
     def _set_theme(self, theme: str):
+        if theme == self._theme:
+            return
         self._theme = theme
         self.C = DARK if theme == "dark" else LIGHT
         self.history.save_setting("theme", theme)
-        self._refresh_theme_buttons()
+        self._rebuild_ui()     # this window restyles instantly…
+        self._apply_to_app()   # …and so does the open popup
+
+    def _rebuild_ui(self):
+        """Tear down and rebuild the whole panel with the current palette.
+
+        Every section bakes colours into its stylesheets at build time, so
+        a palette change requires a rebuild. It happens in one event-loop
+        turn at fixed size — visually it's an instant restyle, no flicker.
+        """
+        old = self.layout()
+        if old is not None:
+            while old.count():
+                it = old.takeAt(0)
+                w = it.widget()
+                if w is not None:
+                    w.deleteLater()
+            # A widget can only ever have one layout — hand the old one to
+            # a throwaway widget so _build() can install a fresh QVBoxLayout.
+            QWidget().setLayout(old)
+        self._build()
+        self.adjustSize()
+
+    def _apply_to_app(self):
+        """Push appearance changes to the live app popup (if open).
+        The popup re-reads theme + transparency from settings on every
+        rebuild, so a _refresh() re-renders it with the new palette."""
+        try:
+            popup = QApplication.instance().property("clipdrop_popup")
+            if popup is not None and getattr(popup, "_popup", None):
+                popup._refresh()
+        except Exception:
+            pass
 
     # ── Opacity ───────────────────────────────────────────────────────────────
 
@@ -342,6 +500,14 @@ class SettingsPanel(QDialog):
         self.setWindowOpacity(opacity)
         self._opacity_lbl.setText(f"{value}%")
         self.history.save_setting("transparency", opacity)
+        # Live-apply to the open popup while the slider drags — a direct
+        # opacity set, no rebuild needed, so it tracks smoothly.
+        try:
+            popup = QApplication.instance().property("clipdrop_popup")
+            if popup is not None and getattr(popup, "_popup", None):
+                popup._popup.setWindowOpacity(opacity)
+        except Exception:
+            pass
 
     # ── History ───────────────────────────────────────────────────────────────
 
@@ -386,6 +552,14 @@ class SettingsPanel(QDialog):
         idx = self._profile_list.row(items[0])
         profs = self.profiles.get_all_profiles()
         return profs[idx] if idx < len(profs) else None
+
+    def _switch_profile(self):
+        p = self._selected_profile()
+        if not p:
+            QMessageBox.information(self, "Switch Profile",
+                "Select a profile first."); return
+        self.profiles.set_active(p["id"])
+        self._refresh_profile_list()
 
     def _new_profile(self):
         name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
