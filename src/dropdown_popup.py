@@ -32,11 +32,12 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QScrollArea, QFrame,
     QAbstractItemView, QMenu, QApplication, QSizePolicy,
-    QGraphicsOpacityEffect, QStyledItemDelegate,
+    QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStyledItemDelegate,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
-    QEasingCurve, pyqtSignal, QObject, pyqtSlot, QThread, QEvent,
+    QVariantAnimation, QEasingCurve, pyqtSignal, QObject, pyqtSlot,
+    QThread, QEvent,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QFontMetrics,
@@ -131,6 +132,35 @@ def _hex_lerp(c1: str, c2: str, t: float) -> str:
     r2,g2,b2 = int(c2[1:3],16), int(c2[3:5],16), int(c2[5:7],16)
     return "#{:02x}{:02x}{:02x}".format(
         int(r1+(r2-r1)*t), int(g1+(g2-g1)*t), int(b1+(b2-b1)*t))
+
+def _shade(col: str, t: float) -> str:
+    """Lighten (t>0, toward white) or darken (t<0, toward black) a hex colour."""
+    return _hex_lerp(col, "#ffffff" if t >= 0 else "#000000", abs(t))
+
+def _grad_v(top: str, bottom: str) -> str:
+    """QSS vertical linear gradient — the '3D surface' fill."""
+    return (f"qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 {top},stop:1 {bottom})")
+
+def _scrollbar_qss(C: dict) -> str:
+    """Shared modern scrollbar: transparent track, rounded gradient handle
+    in ACCENT colour so it's visible even while inactive, brighter on
+    hover, lightest while dragging. No arrow buttons."""
+    handle_top = _shade(C["accent"], 0.12)
+    handle_bot = _shade(C["accent"], -0.22)
+    hover      = _shade(C["accent"], 0.32)
+    return (
+        f"QScrollBar:vertical {{background:transparent;width:10px;"
+        f"margin:2px 2px 2px 0;border:none;}}"
+        f"QScrollBar::handle:vertical {{"
+        f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+        f"stop:0 {handle_top},stop:1 {handle_bot});"
+        f"border-radius:4px;min-height:28px;}}"
+        f"QScrollBar::handle:vertical:hover {{background:{hover};}}"
+        f"QScrollBar::handle:vertical:pressed {{background:{C['accent_light']};}}"
+        f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {{height:0;}}"
+        f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical "
+        f"{{background:none;}}")
 
 def _set_no_activate(hwnd: int):
     """Apply WS_EX_NOACTIVATE so the window never steals keyboard focus."""
@@ -498,14 +528,22 @@ class ItemRowWidget(QWidget):
 
     def __init__(self, item: dict, history, profiles, colours: dict, parent=None):
         super().__init__(parent)
+        # QWidget SUBCLASSES don't paint stylesheet backgrounds unless
+        # this attribute is set. Rows used to inherit their background
+        # from the popup's window-level stylesheet; the phase-1 card
+        # scoped that stylesheet away, so rows must self-paint now.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.item     = item
         self.history  = history
         self.profiles = profiles
         self.C        = colours
-        self._anim_t  = 0.0
-        self._anim_timer = QTimer(self)
-        self._anim_timer.timeout.connect(self._anim_step)
-        self._anim_target = 0.0
+        # Eased hover animation. OutExpo ≈ the old exponential-chase lerp:
+        # instant response, long soft landing — the "fluid" feel.
+        self._anim_t = 0.0
+        self._anim   = QVariantAnimation(self)
+        self._anim.setDuration(250)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutExpo)
+        self._anim.valueChanged.connect(self._on_anim_value)
 
         # Drag state
         self._press_pos   = None
@@ -666,29 +704,27 @@ class ItemRowWidget(QWidget):
     # ── Hover animation ──────────────────────────────────────────────────────
 
     def _enter_hover(self):
-        self._anim_target = 1.0
-        if not self._anim_timer.isActive():
-            self._anim_timer.start(16)
+        self._animate_to(1.0)
 
     def _leave_hover(self):
-        self._anim_target = 0.0
-        if not self._anim_timer.isActive():
-            self._anim_timer.start(16)
+        self._animate_to(0.0)
 
-    def _anim_step(self):
-        diff = self._anim_target - self._anim_t
-        if abs(diff) < 0.015:
-            self._anim_t = self._anim_target
-            self._anim_timer.stop()
-        else:
-            self._anim_t += diff * 0.45
-        bg = _hex_lerp(self._base_bg, self.C["bg_hover"], self._anim_t)
+    def _animate_to(self, target: float):
+        self._anim.stop()
+        self._anim.setStartValue(self._anim_t)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _on_anim_value(self, v):
+        t = self._anim_t = float(v)
+        # Three cheap stylesheet updates per frame — nothing heavier.
+        # (A QGraphicsDropShadowEffect glow was tried here: it forces the
+        # row to re-rasterize through a blur EVERY frame, which visibly
+        # janks the animation. Never attach effects to animated rows.)
+        bg = _hex_lerp(self._base_bg, self.C["bg_hover"], t)
         self._apply_bg(bg)
-        # Strip width 3→10
-        w = max(3, int(3 + 7 * self._anim_t))
-        self._strip.setFixedWidth(w)
-        # Preview text colour
-        tc = _hex_lerp(self.C["text_preview"], self.C["text"], self._anim_t)
+        self._strip.setFixedWidth(max(3, int(3 + 7 * t)))
+        tc = _hex_lerp(self.C["text_preview"], self.C["text"], t)
         self._preview_lbl.setStyleSheet(f"color:{tc};background:transparent;")
 
     def enterEvent(self, event):
@@ -924,6 +960,9 @@ class SidePanelWidget(QWidget):
                                 Qt.WindowType.WindowStaysOnTopHint |
                                 Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        # MUST come before winId() below — translucency only applies if
+        # set before the native window is created.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         _set_no_activate(int(self.winId()))
 
         self.files    = files
@@ -943,9 +982,24 @@ class SidePanelWidget(QWidget):
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._close_if_cursor_outside)
 
-        self.setStyleSheet(f"background:{colours['bg']};border:1px solid {colours['border']};")
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0,0,0,0)
+        # Rounded card + Qt drop shadow inside transparent margins —
+        # same elevation recipe as the main popup.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 6, 8, 11)
+        card = QWidget(self)
+        card.setObjectName("panel_card")
+        card.setStyleSheet(
+            f"QWidget#panel_card {{background:{colours['bg']};"
+            f"border:1px solid {colours['border']};border-radius:8px;}}")
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(18)
+        _shadow.setOffset(0, 3)
+        _shadow.setColor(QColor(0, 0, 0, 140))
+        card.setGraphicsEffect(_shadow)
+        outer.addWidget(card)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(1, 1, 1, 7)   # bottom pad = rounded base
         lay.setSpacing(0)
 
         # Header — nested folder panels show the folder name
@@ -954,7 +1008,12 @@ class SidePanelWidget(QWidget):
         hdr = QLabel(hdr_text, self)
         hdr.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         hdr.setFixedHeight(28)
-        hdr.setStyleSheet(f"background:{colours['accent']};color:white;padding-left:6px;")
+        hdr.setStyleSheet(
+            f"background:{_grad_v(colours['accent_light'], _shade(colours['accent'], -0.18))};"
+            f"color:white;padding-left:6px;"
+            f"border-top-left-radius:7px;"
+            f"border-top-right-radius:7px;"
+            f"border-bottom:1px solid rgba(0,0,0,90);")
         lay.addWidget(hdr)
         self._hdr = hdr   # kept so per-file delete can update the count live
 
@@ -967,7 +1026,7 @@ class SidePanelWidget(QWidget):
                                  padding-right:36px; /* clear of count + pin */ }}
             QListWidget::item:hover {{ background:{colours['bg_hover']}; }}
             QListWidget::item:selected {{ background:{colours['bg_hover']}; }}
-        """)
+        """ + _scrollbar_qss(colours))
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setFixedWidth(self.PANEL_W)
         self._list.setIconSize(QSize(16, 16))
@@ -1135,10 +1194,12 @@ class SidePanelWidget(QWidget):
         g = screen.availableGeometry()
         space_right = g.right() - my.right()
         space_left  = my.left() - g.left()
+        # Overlap the transparent shadow margins (8px each side) so the
+        # visible cards sit ~2px apart with no dead zone for the cursor.
         if space_right >= pw or space_right >= space_left:
-            px = my.right() + 1
+            px = my.right() - 14
         else:
-            px = my.left() - pw
+            px = my.left() - pw + 14
         px = max(g.left(), min(px, g.right() - pw))
         # Align with the hovered row, clamped on-screen
         row_top = self._list.viewport().mapToGlobal(
@@ -1479,7 +1540,11 @@ class DropdownPopup(QObject):
                                Qt.WindowType.Tool)
         popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        popup.setStyleSheet(f"background:{C['bg']};border:1px solid {C['border']};")
+        # Translucent window + inner rounded "card" + Qt drop shadow =
+        # modern elevation. This is the standard frameless-depth recipe:
+        # DWM shadows don't render on layered (translucent) windows on
+        # Win10, so the shadow is painted by Qt into transparent margins.
+        popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         popup.setWindowOpacity(self._opacity)
         self._popup = popup
 
@@ -1487,8 +1552,22 @@ class DropdownPopup(QObject):
         # NOTE: popup.show() is intentionally called AFTER the layout is fully built
         # and positioned — see the bottom of this method. Do NOT move it up here.
 
-        main_lay = QVBoxLayout(popup)
-        main_lay.setContentsMargins(1,1,1,1)
+        outer = QVBoxLayout(popup)
+        outer.setContentsMargins(10, 8, 10, 14)   # room for the shadow
+        card = QWidget(popup)
+        card.setObjectName("clipdrop_card")
+        card.setStyleSheet(
+            f"QWidget#clipdrop_card {{background:{C['bg']};"
+            f"border:1px solid {C['border']};border-radius:10px;}}")
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(22)
+        _shadow.setOffset(0, 4)
+        _shadow.setColor(QColor(0, 0, 0, 150))
+        card.setGraphicsEffect(_shadow)
+        outer.addWidget(card)
+
+        main_lay = QVBoxLayout(card)
+        main_lay.setContentsMargins(1, 1, 1, 9)   # bottom pad = rounded base
         main_lay.setSpacing(0)
 
         # ── Header ────────────────────────────────────────────────────────────
@@ -1512,6 +1591,9 @@ class DropdownPopup(QObject):
         # ── Item list ────────────────────────────────────────────────────────
         self._items_all    = items
         self._list_container = QWidget(popup)
+        # Explicit dark background — the card's stylesheet is selector-
+        # scoped and no longer cascades here (was the white-rows bug).
+        self._list_container.setStyleSheet(f"background:{C['bg']};")
         self._list_lay     = QVBoxLayout(self._list_container)
         self._list_lay.setContentsMargins(0,0,0,0)
         self._list_lay.setSpacing(0)
@@ -1526,12 +1608,12 @@ class DropdownPopup(QObject):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(f"QScrollArea{{border:none;background:{C['bg']};}} "
-                             f"QScrollBar:vertical{{width:8px;background:{C['bg_item']};}} "
-                             f"QScrollBar::handle:vertical{{background:{C['border']};border-radius:4px;}}")
+                             + _scrollbar_qss(C))
         scroll.setFixedWidth(POPUP_WIDTH + 10)
         max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
         scroll.setFixedHeight(max_h)
         main_lay.addWidget(scroll)
+        self._scroll = scroll   # kept so _refresh can resize in place
 
         # Connect search
         self._search_edit.textChanged.connect(self._on_search)
@@ -1556,7 +1638,13 @@ class DropdownPopup(QObject):
     def _build_header(self, parent, items, C) -> QWidget:
         hdr = QWidget(parent)
         hdr.setFixedHeight(36)
-        hdr.setStyleSheet(f"background:{C['accent']};")
+        # Gradient surface (lighter top → darker base) + a dark seam at
+        # the bottom edge = raised 3D header. Top radii follow the card.
+        hdr.setStyleSheet(
+            f"background:{_grad_v(C['accent_light'], _shade(C['accent'], -0.18))};"
+            f"border-top-left-radius:9px;"
+            f"border-top-right-radius:9px;"
+            f"border-bottom:1px solid rgba(0,0,0,90);")
 
         lay = QHBoxLayout(hdr)
         lay.setContentsMargins(PADDING, 0, PADDING, 0)
@@ -1606,7 +1694,12 @@ class DropdownPopup(QObject):
 
     def _build_search(self, parent, C) -> tuple:
         bar = QWidget(parent)
-        bar.setStyleSheet(f"background:{C['bg_item']};")
+        # Inset "channel" look: darker recessed field, shadow line above,
+        # faint highlight below — reads as pressed-into the surface.
+        bar.setStyleSheet(
+            f"background:{_shade(C['bg_item'], -0.25)};"
+            f"border-top:1px solid rgba(0,0,0,80);"
+            f"border-bottom:1px solid rgba(255,255,255,14);")
         lay = QHBoxLayout(bar)
         lay.setContentsMargins(8, 4, 8, 4)
         lay.setSpacing(4)
@@ -1770,10 +1863,15 @@ class DropdownPopup(QObject):
             space_right = g.right() - pop.right()
             space_left  = pop.left() - g.left()
 
+            # Both windows carry transparent shadow margins (popup 10px,
+            # panel 8px) — overlap the frames so the visible cards sit
+            # ~2px apart AND the cursor never crosses a dead zone between
+            # windows (transparent pixels are click-through, so overlap
+            # is harmless).
             if space_right >= pw or space_right >= space_left:
-                px = pop.right() + 1            # flyout to the right
+                px = pop.right() - 16           # flyout to the right
             else:
-                px = pop.left() - pw            # flyout to the left
+                px = pop.left() - pw + 16       # flyout to the left
             px = max(g.left(), min(px, g.right() - pw))
 
             # Align with the hovered row, clamped so the panel stays on-screen
@@ -1910,13 +2008,58 @@ class DropdownPopup(QObject):
         self.history.move_down(item["id"])
         self._refresh()
 
-    def _refresh(self):
-        """Rebuild popup in-place at current position. No flicker.
-        The side panel (if open) survives the rebuild."""
-        if self._popup:
-            x = self._popup.x()
-            y = self._popup.y()
-            self._build_and_show(x, y, keep_panel=True)
+    def _refresh(self, full: bool = False):
+        """Update the OPEN popup live — like the side panels do.
+
+        Default (light) refresh rebuilds only the row list and header
+        labels inside the existing window: no destroy/recreate, no
+        flicker. This is the same machinery live search filtering uses.
+
+        full=True tears the window down and rebuilds it — needed only
+        when the window CHROME changes (theme switch restyles the card,
+        header gradient, scrollbars…). Used by the settings panel.
+        """
+        if not self._popup:
+            return
+        if full:
+            self._build_and_show(self._popup.x(), self._popup.y(),
+                                 keep_panel=True)
+            return
+
+        # Re-fetch data
+        if self.profiles:
+            items = self.profiles.get_active_items()
+        else:
+            items = self.history.get_all() if self.history else []
+        self._items_all = items
+
+        # Rows — respect an active search filter if one is typed
+        query = self._search_edit.text() if self._search_edit else ""
+        if query.strip():
+            self._on_search(query)     # repopulates + sets count label
+        else:
+            self._populate_list(items)
+            if not items:
+                self._build_empty_label(self._list_container, self._colours)
+            if self._count_lbl:
+                self._count_lbl.setText(f"{len(items)} items")
+
+        # Header profile name (active profile may have changed)
+        if getattr(self, "_prof_btn", None) is not None and self.profiles:
+            try:
+                name = self.profiles.get_active_profile()["name"]
+                self._prof_btn.setText(f"{name}  ▾")
+            except RuntimeError:
+                pass
+
+        # Window height follows the item count
+        if getattr(self, "_scroll", None) is not None:
+            max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
+            self._scroll.setFixedHeight(max_h)
+            self._popup.adjustSize()
+
+        # Close-behaviour setting may have changed
+        self._start_hover_close_if_enabled()
 
     # ── Hide ──────────────────────────────────────────────────────────────────
 

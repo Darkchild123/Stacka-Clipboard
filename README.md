@@ -181,24 +181,31 @@ ClipDrop/
 
 ### Version 1.0 (MVP)
 - [x] App design and concept defined
-- [ ] Clipboard monitoring (text, files, images)
-- [ ] Persistent history storage
-- [ ] Right-click context menu integration
-- [ ] Cursor-position dropdown popup
-- [ ] Item previews (text snippet, file icon, image thumbnail)
-- [ ] Pin and delete per item
-- [ ] Reorder items (move up / move down)
-- [ ] Source tracking (file path, directory, or URL per item)
-- [ ] System tray icon
-- [ ] Simple settings panel (history size, clear history)
+- [x] Clipboard monitoring (text, files, images)
+- [x] Persistent history storage
+- [x] Right-click context menu integration
+- [x] Cursor-position dropdown popup
+- [x] Item previews (text snippet, file icon, image thumbnail)
+- [x] Pin and delete per item
+- [x] Reorder items (move up / move down)
+- [x] Source tracking (file path, directory, or URL per item)
+- [x] System tray icon
+- [x] Settings panel (history size, themes, transparency, close behaviour, profiles)
 - [ ] Installer / packaged .exe for Windows
 
+### Delivered beyond MVP
+- [x] Search through clipboard history (live filtering)
+- [x] Keyboard shortcut to open ClipDrop (`Ctrl+Shift+V`)
+- [x] Profiles — named clipboard collections with per-profile pins
+- [x] Dark / light themes with live switching
+- [x] Multi-file side panel with per-file actions and nested folder preview
+- [x] Hex colour code detection with live colour swatch icons
+- [x] Content counts on multi-file and folder rows
+- [x] In-app toast notifications for every action
+
 ### Future Ideas (v2+)
-- [ ] Search through clipboard history
-- [ ] Keyboard shortcut to open ClipDrop
-- [ ] Favourites / named clips
 - [ ] Auto-clear history after X days
-- [ ] Dark mode / theme options
+- [ ] Windows Store packaging
 
 ---
 
@@ -372,12 +379,15 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-05-25 | Bug 6 fixed — overlay no longer closes native context menu (removed focus_force) |
 | 2026-05-25 | Bug 7 fixed — overlay button positioning overhauled with retry logic, border math, and dead zone handling |
 | 2026-05-25 | Bug 8 fixed — "Paste from ClipDrop" in Explorer now triggers popup via signal file watcher |
+| 2026-05-30 | UI framework migrated from tkinter to PyQt6 — all 5 UI files rewritten |
+| 2026-07-19 | Stability pass — threaded paste, crash fixes, popup persistence, side-panel actions, live settings |
+| 2026-07-20 | Visual overhaul — floating rounded cards with shadows, gradient surfaces, accent scrollbars, fluid hover motion, live in-place updates |
 
 ---
 
 ## About This Project
 
-ClipDrop is being built by **Cosmas** as a first software development project — going from idea to working application. The goal is to learn by building something genuinely useful.
+ClipDrop is being built by **Cosmas** as a first software development project — going from idea to a working, polished application. The goal is to learn by building something genuinely useful.
 
 ---
 
@@ -430,4 +440,98 @@ PyQt6 solves every one of these issues natively:
 - **Borderless windows** — `Qt.FramelessWindowHint` works correctly on Windows without the focus issues of `overrideredirect`.
 
 PyQt6 was chosen over alternatives (Dear PyGui, Flet, Kivy, wxPython) because ClipDrop is a Windows OS utility that requires deep native integration — system tray, clipboard API, global hotkeys, and borderless cursor-positioned windows — all of which PyQt6 handles natively.
+
+---
+
+### 🎨 Visual Overhaul & Stability Update (July 2026)
+
+**Status:** ✅ Complete
+
+A full polish pass over the PyQt6 UI: modern depth, fluid motion, live
+in-place updates, and a set of hard-won stability fixes.
+
+#### Visual upgrade — three phases
+
+**Phase 1 — Elevation.** The popup and all side panels are now floating
+rounded cards with real drop shadows, drawn into transparent window
+margins (DWM shadows don't render on layered windows, so Qt paints
+them). The settings window's native title bar follows the app theme —
+dark theme, dark title bar — via the Windows DWM API.
+
+**Phase 2 — Surfaces.** Headers use vertical gradients with a dark seam
+at the base (raised-surface look). Buttons have gradient faces, hover
+brightening, and a pressed state that darkens and shifts the label 1px
+down. The search field is a recessed inset channel. Scrollbars are slim,
+rounded, and accent-coloured so they're visible even at rest — brighter
+on hover, lightest while dragging.
+
+**Phase 3 — Motion.** Row hover runs on an eased animation curve
+(OutExpo — instant response, soft landing) driving background tint,
+accent-strip growth, and text brightening together. All data actions
+(pin, delete, move, profile switch) update the open popup **live and
+in-place** — the window is never destroyed and rebuilt.
+
+#### Interaction upgrades
+
+- The popup stays open through pin / delete / move / profile actions
+  and pasting — it closes only on outside click or `Escape`
+- Optional **hover-to-close** mode (close the popup by moving the mouse
+  away) selectable in Settings
+- Paste runs entirely on a worker thread — the UI never freezes,
+  even while pasting large images
+- Paste-target validation: pasting raw text into File Explorer or the
+  desktop shows a clear error instead of failing silently; images
+  pasted there become PNG file copies automatically
+- Multi-file side panel: per-file right-click menu (Send to profile /
+  Pin / Delete), panel-specific pins with red pin markers, hover-reveal
+  of folder contents in a nested panel, and item counts on every
+  folder row
+- All-new icon set rendered at 4× supersampling for crisp edges:
+  Office-style letter tiles, PDF tile, DLL gear, chain-link URLs,
+  globe HTML, and live colour swatches for copied hex colour codes
+- In-app toast notifications for every action (paste confirmations
+  with the item name, errors, profile sends) — subtle, 1.5 s max
+
+#### Notable bugs fixed along the way
+
+**Frozen UI during paste.** The entire paste sequence (clipboard write,
+focus handling, `Ctrl+V`, watcher resume) ran on the UI thread with
+built-in delays — about one full second of frozen interface per paste.
+It now runs on a dedicated worker thread with signal-based error
+reporting; the UI thread never sleeps.
+
+**Hard crash when clicking a file in the side panel.** Clicking a file
+tore down the panel's widget tree synchronously — from *inside* the
+panel's own mouse-release handler. The native widget was destroyed
+while its event code was still on the stack (use-after-free), killing
+the process with no traceback. Fix: the action is deferred one
+event-loop turn so the stack unwinds before teardown. Rule adopted
+project-wide: never destroy a widget tree from inside its own event
+handler.
+
+**Popup closing on its own menus.** The global click monitor treated
+clicks in ClipDrop's *other* windows (side panels, context menus) as
+"outside" clicks and hid the popup — each new window type reintroduced
+the bug. The hit test now asks Windows which process owns the clicked
+window: any ClipDrop-owned window counts as inside. Fixed permanently
+for all current and future windows.
+
+**Rows rendering white after the card restyle.** Scoping the window's
+stylesheet to the new rounded card silently removed the background
+cascade that child widgets depended on, and Qt does not paint stylesheet
+backgrounds on QWidget subclasses unless explicitly told to
+(`WA_StyledBackground`). Rows and the list container now paint their
+own backgrounds.
+
+**Pin/delete flicker.** Any data change rebuilt the entire popup
+window — a visible blink. `_refresh()` now updates rows, header counts,
+and window height inside the existing window (the same machinery the
+live search filter uses); a full rebuild happens only on theme changes.
+
+**Search box not accepting input.** The popup deliberately never takes
+keyboard focus (`WS_EX_NOACTIVATE`) so pastes land in the target app —
+which also blocked typing in search. Clicking into the search field now
+activates the window on demand, and the paste worker re-foregrounds the
+original target before sending `Ctrl+V`, so pasting still lands in the
+right place after a search.
 

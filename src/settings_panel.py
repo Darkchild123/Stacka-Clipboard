@@ -51,11 +51,56 @@ LIGHT = {
 }
 
 
+def _lerp(c1: str, c2: str, t: float) -> str:
+    r1,g1,b1 = int(c1[1:3],16), int(c1[3:5],16), int(c1[5:7],16)
+    r2,g2,b2 = int(c2[1:3],16), int(c2[3:5],16), int(c2[5:7],16)
+    return "#{:02x}{:02x}{:02x}".format(
+        int(r1+(r2-r1)*t), int(g1+(g2-g1)*t), int(b1+(b2-b1)*t))
+
+def _shade(col: str, t: float) -> str:
+    """Lighten (t>0) or darken (t<0) a hex colour."""
+    return _lerp(col, "#ffffff" if t >= 0 else "#000000", abs(t))
+
+def _grad_v(top: str, bottom: str) -> str:
+    return (f"qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 {top},stop:1 {bottom})")
+
 def _btn_style(bg: str, hover: str, fg: str = "white") -> str:
-    return (f"QPushButton {{background:{bg};color:{fg};"
+    """Raised 3D button: gradient face, darker seam border, brighter on
+    hover, and a pressed state that darkens and shifts the label 1px
+    down — the classic press-in effect."""
+    face   = _grad_v(_shade(bg, 0.16), _shade(bg, -0.12))
+    hface  = _grad_v(_shade(hover, 0.18), _shade(hover, -0.06))
+    press  = _shade(bg, -0.28)
+    seam   = _shade(bg, -0.30)
+    return (f"QPushButton {{background:{face};color:{fg};"
             f"font-family:'Segoe UI';font-size:9pt;"
-            f"padding:5px 12px;border-radius:4px;border:none;}}"
-            f"QPushButton:hover {{background:{hover};}}")
+            f"padding:5px 12px;border-radius:4px;"
+            f"border:1px solid {seam};}}"
+            f"QPushButton:hover {{background:{hface};}}"
+            f"QPushButton:pressed {{background:{press};"
+            f"padding-top:6px;padding-bottom:4px;}}")
+
+
+def _scrollbar_qss(C: dict) -> str:
+    """Modern scrollbar matching the popup's: transparent track, rounded
+    gradient handle in ACCENT colour (visible while inactive), brighter
+    on hover, lightest while dragging."""
+    handle_top = _shade(C["accent"], 0.12)
+    handle_bot = _shade(C["accent"], -0.22)
+    hover      = _shade(C["accent"], 0.32)
+    return (
+        f"QScrollBar:vertical {{background:transparent;width:10px;"
+        f"margin:2px 2px 2px 0;border:none;}}"
+        f"QScrollBar::handle:vertical {{"
+        f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+        f"stop:0 {handle_top},stop:1 {handle_bot});"
+        f"border-radius:4px;min-height:28px;}}"
+        f"QScrollBar::handle:vertical:hover {{background:{hover};}}"
+        f"QScrollBar::handle:vertical:pressed {{background:{C['accent_hover']};}}"
+        f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {{height:0;}}"
+        f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical "
+        f"{{background:none;}}")
 
 
 class SettingsPanel(QWidget):
@@ -93,8 +138,26 @@ class SettingsPanel(QWidget):
         fg.moveCenter(screen.availableGeometry().center())
         self.move(fg.topLeft())
 
+        # Native title bar follows the app theme (dark/light)
+        self._apply_titlebar_theme()
+
         # Install global event filter for click-outside-to-close
         QApplication.instance().installEventFilter(self)
+
+    def _apply_titlebar_theme(self):
+        """Match the native Windows title bar to the app theme via DWM
+        (DWMWA_USE_IMMERSIVE_DARK_MODE). Works on Win10 1903+ and Win11;
+        silently a no-op anywhere it isn't supported."""
+        try:
+            import ctypes
+            val  = ctypes.c_int(1 if self._theme == "dark" else 0)
+            hwnd = int(self.winId())
+            for attr in (20, 19):   # 19 = pre-20H1 builds
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(val), 4) == 0:
+                    break
+        except Exception:
+            pass
 
     # ── Click-outside-to-close ────────────────────────────────────────────────
 
@@ -136,12 +199,14 @@ class SettingsPanel(QWidget):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # Header
+        # Header — gradient surface with a dark seam (raised 3D look)
         hdr = QLabel("📋  ClipDrop Settings", self)
         hdr.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hdr.setFixedHeight(48)
-        hdr.setStyleSheet(f"background:{C['accent']};color:white;")
+        hdr.setStyleSheet(
+            f"background:{_grad_v(C['accent_hover'], _shade(C['accent'], -0.18))};"
+            f"color:white;border-bottom:1px solid rgba(0,0,0,90);")
         main.addWidget(hdr)
 
         # Scrollable content — the window stays compact; sections that
@@ -169,14 +234,8 @@ class SettingsPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet(f"""
-            QScrollArea {{background:{C['bg']};border:none;}}
-            QScrollBar:vertical {{background:{C['bg']};width:8px;margin:0;}}
-            QScrollBar::handle:vertical {{background:{C['border']};
-                border-radius:4px;min-height:24px;}}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{height:0;}}
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{background:none;}}
-        """)
+        scroll.setStyleSheet(f"QScrollArea {{background:{C['bg']};border:none;}}"
+                             + _scrollbar_qss(C))
         main.addWidget(scroll, 1)
 
         # Footer close button
@@ -459,8 +518,9 @@ class SettingsPanel(QWidget):
         self._theme = theme
         self.C = DARK if theme == "dark" else LIGHT
         self.history.save_setting("theme", theme)
-        self._rebuild_ui()     # this window restyles instantly…
-        self._apply_to_app()   # …and so does the open popup
+        self._rebuild_ui()             # this window restyles instantly…
+        self._apply_titlebar_theme()   # …including the native title bar…
+        self._apply_to_app()           # …and so does the open popup
 
     def _rebuild_ui(self):
         """Tear down and rebuild the whole panel with the current palette.
@@ -484,12 +544,13 @@ class SettingsPanel(QWidget):
 
     def _apply_to_app(self):
         """Push appearance changes to the live app popup (if open).
-        The popup re-reads theme + transparency from settings on every
-        rebuild, so a _refresh() re-renders it with the new palette."""
+        full=True: theme changes restyle the window CHROME (card, header
+        gradient, scrollbars), which needs the popup's full rebuild path —
+        plain data refreshes stay in-place and flicker-free."""
         try:
             popup = QApplication.instance().property("clipdrop_popup")
             if popup is not None and getattr(popup, "_popup", None):
-                popup._refresh()
+                popup._refresh(full=True)
         except Exception:
             pass
 
