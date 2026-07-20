@@ -195,13 +195,17 @@ ClipDrop/
 
 ### Delivered beyond MVP
 - [x] Search through clipboard history (live filtering)
-- [x] Keyboard shortcut to open ClipDrop (`Ctrl+Shift+V`)
+- [x] Fully configurable global shortcuts with a dedicated manager window
 - [x] Profiles — named clipboard collections with per-profile pins
 - [x] Dark / light themes with live switching
 - [x] Multi-file side panel with per-file actions and nested folder preview
 - [x] Hex colour code detection with live colour swatch icons
 - [x] Content counts on multi-file and folder rows
 - [x] In-app toast notifications for every action
+- [x] Ctrl+click multi-selection with combined paste (all lists)
+- [x] Drag & drop items out of ClipDrop into any app
+- [x] Snippet scratchpad — type a note, save it straight into history
+- [x] Pause/resume capture, clear history, and profile cycling by hotkey
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -382,6 +386,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-05-30 | UI framework migrated from tkinter to PyQt6 — all 5 UI files rewritten |
 | 2026-07-19 | Stability pass — threaded paste, crash fixes, popup persistence, side-panel actions, live settings |
 | 2026-07-20 | Visual overhaul — floating rounded cards with shadows, gradient surfaces, accent scrollbars, fluid hover motion, live in-place updates |
+| 2026-07-20 | Interactivity update — shortcuts manager with 5 rebindable global hotkeys, snippet scratchpad, Ctrl+click multi-selection with combined paste, drag & drop out, smarter overlay button positioning, profile-switch and context-menu stability fixes |
 
 ---
 
@@ -534,4 +539,97 @@ which also blocked typing in search. Clicking into the search field now
 activates the window on demand, and the paste worker re-foregrounds the
 original target before sending `Ctrl+V`, so pasting still lands in the
 right place after a search.
+
+---
+
+### ⚡ Interactivity & Shortcuts Update (July 2026)
+
+**Status:** ✅ Complete
+
+A major interactivity pass: configurable global shortcuts, multi-item
+workflows, drag & drop, and another round of hard-won stability fixes.
+
+#### Shortcuts manager
+
+A dedicated **Shortcuts window** (Settings → Manage Shortcuts…) where
+every global hotkey is rebindable. Click the ⏺ listen button — it pulses
+while capturing — press your combination, Save applies live. Guard
+rails: duplicate assignments are refused with the owning action named,
+well-known Windows combos (Copy, Alt+Tab, Task Manager…) trigger an
+"already in use" warning before you steal them, failed bindings roll
+back to the previous working combo, and every shortcut has a one-click
+reset to default.
+
+| Action | Default |
+|---|---|
+| Open ClipDrop popup | `Ctrl+Shift+V` |
+| Pause / resume clipboard capture | `Ctrl+Shift+P` |
+| New snippet (blank scratchpad) | `Ctrl+Shift+N` |
+| Clear all history (with confirmation) | `Ctrl+Shift+H` |
+| Switch to next profile | `Ctrl+Shift+O` |
+
+#### Snippet scratchpad
+
+`Ctrl+Shift+N` opens a blank editor window anywhere. Type a note or a
+code fragment, hit Save (or `Ctrl+S`) — it lands in the clipboard
+history like any copied item: pasteable, pinnable, searchable,
+assignable to profiles, and auto-classified (code, hex colour, URL,
+plain text).
+
+#### Multi-selection & combined paste
+
+`Ctrl+click` toggles items into a multi-selection in **every** list —
+main popup, file side panels, nested folder panels. Selected rows show
+an accent outline; the header count becomes a clickable **✕ N selected**
+badge that clears the selection, and `Escape` steps back through
+side-panel selection → main selection → close. Clicking any selected
+row pastes the **whole selection as one payload**: text items joined
+line-by-line, files merged into a single multi-file paste. Selection
+survives live list refreshes and resets when the popup closes.
+
+#### Drag & drop out of ClipDrop
+
+Drag any main-list row into another app: files and images travel as
+real file URLs (drop on Explorer to copy them), text drops into
+editors and forms. Dragging a selected row carries the entire
+selection — the drag image shows a count bubble. Auto-close timers
+stand down while a drag is in flight, so the source window can never
+be destroyed mid-drag.
+
+#### Smarter "Paste from ClipDrop" button
+
+The floating right-click button was rewritten around a simple rule:
+**anchor at the cursor, hug the context menu's border**. When the
+app's menu is detected, the button sits just outside the menu edge
+nearest the click, at cursor height. When it isn't, the button sits
+beside the cursor on the side the menu won't occupy. Every placement
+clamps to the monitor the click happened on, taskbar excluded — no
+more drifting across the screen or landing on the taskbar.
+
+#### Notable fixes in this update
+
+**System-wide drag lag.** The global mouse hook ran Python for every
+mouse event on the system — including every mouse-move — adding cursor
+latency that made OS drag-and-drop stutter badly. The hook now bails
+on anything but the two button events it needs, at the cost of a
+single integer comparison.
+
+**Stuck context menus.** Right-click menus opened from the popup could
+ignore outside clicks and even outlive the app on screen. Menus from a
+no-activate window can't establish their dismissal grab — they are now
+parented to the popup (they die with it) and the owner window is
+activated just before the menu opens.
+
+**Frozen profile switching.** Switching profiles could freeze the popup
+on the previous profile's content. Two root causes: partial repaints of
+a translucent window were rejected by Windows when the drop shadow's
+repaint region overflowed the window bounds (shadow blur must fit
+inside the transparent margins — now an enforced invariant), and the
+window height was computed from a stale layout hint (now derived
+exactly from a chrome-height measurement taken at build time).
+
+**Send to General.** The right-click "Send to profile" menus — main
+list, side panels, nested panels — now include General everywhere it
+makes sense; sending a side-panel file there creates its own visible
+history entry.
 

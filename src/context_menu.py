@@ -28,8 +28,8 @@ import win32gui
 import win32process
 import psutil
 
-from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout, QApplication
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject
+from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout, QApplication, QMessageBox
+from PyQt6.QtCore    import Qt, QTimer, QPoint, pyqtSignal, QObject
 
 # ---- Windows API constants ----
 WH_MOUSE_LL   = 14
@@ -38,6 +38,19 @@ WM_LBUTTONDOWN = 0x0201
 WM_QUIT       = 0x0012
 
 HOTKEY = "ctrl+shift+v"
+
+# ── Configurable shortcuts (canonical table) ─────────────────────────────────
+# (settings_key, label shown in the Shortcuts window, default combo)
+# The Shortcuts window builds its rows from this list; ContextMenu binds
+# every entry at startup. Defaults use plain letters only — named keys
+# (Del, Tab…) spell differently between Qt and the keyboard library.
+SHORTCUT_DEFS = [
+    ("hotkey_open",    "Open ClipDrop popup window",       "ctrl+shift+v"),
+    ("hotkey_pause",   "Pause / resume clipboard capture", "ctrl+shift+p"),
+    ("hotkey_snippet", "New snippet (blank scratchpad)",   "ctrl+shift+n"),
+    ("hotkey_clear",   "Clear all history",                "ctrl+shift+h"),
+    ("hotkey_profile", "Switch to next profile",           "ctrl+shift+o"),
+]
 
 REG_PATHS = [
     r"*\shell\ClipDrop",
@@ -56,6 +69,10 @@ class _OverlaySignals(QObject):
     show_overlay = pyqtSignal(int, int, object)   # x, y, menu_rect or None
     hide_overlay = pyqtSignal()
     hide_popup_if_outside = pyqtSignal(int, int)
+    run_action   = pyqtSignal(str)   # settings_key of a hotkey action —
+                                     # hotkey callbacks fire on the keyboard
+                                     # library's thread; this marshals them
+                                     # onto the Qt main thread.
 
 
 class OverlayButton(QWidget):
@@ -105,25 +122,32 @@ class OverlayButton(QWidget):
                 pass
 
     def show_at(self, x: int, y: int, menu_rect):
+        """Place the button AT the cursor, hugging the context menu's
+        border — never covering the menu, never drifting across the
+        screen, never on the taskbar.
+
+        Anchor is always the CURSOR (where the user's attention is).
+        With a detected menu rect we sit just outside the menu border
+        nearest the cursor, vertically aligned with the click. Without
+        one we sit beside the cursor on the side the menu won't occupy.
+        """
         self._timer.stop()
         # sizeHint() asks the layout for its required size without needing
-        # the widget to have been shown before — equivalent to tkinter's
-        # winfo_reqwidth(). Using width()/height() on an unshown widget
-        # returns 0 and breaks all positioning calculations.
+        # the widget to have been shown before. width()/height() on an
+        # unshown widget return 0 and break all positioning calculations.
         self.ensurePolished()
         hint = self.sizeHint()
         w = hint.width()  if hint.width()  > 0 else 200
         h = hint.height() if hint.height() > 0 else 40
-        screen = QApplication.primaryScreen().geometry()
-        sw, sh = screen.width(), screen.height()
+        # The screen the CLICK is on, taskbar excluded — primaryScreen()
+        # .geometry() put the button on the taskbar / wrong monitor.
+        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
+        g = screen.availableGeometry()
 
         if menu_rect:
-            pos_x, pos_y = self._best_position(menu_rect, w, h, sw, sh)
+            pos_x, pos_y = self._beside_menu(x, y, menu_rect, w, h, g)
         else:
-            PAD = 10; EDGE = 5
-            in_dead = (sw*0.40 <= x <= sw*0.60 and sh*0.40 <= y <= sh*0.60)
-            pos_x = max(EDGE, x - w - PAD) if (in_dead or x < sw//2) else min(x+PAD, sw-w-EDGE)
-            pos_y = max(EDGE, y - h - PAD) if y < sh//2 else min(y+PAD, sh-h-EDGE)
+            pos_x, pos_y = self._beside_cursor(x, y, w, h, g)
 
         self.move(pos_x, pos_y)
         self.show()
@@ -131,26 +155,60 @@ class OverlayButton(QWidget):
         self.raise_()
         self._timer.start(3000)
 
-    def _best_position(self, menu_rect, btn_w, btn_h, sw, sh):
+    def _beside_menu(self, x, y, menu_rect, w, h, g):
+        """Hug the menu border nearest the cursor, at cursor height."""
         ml, mt, mr, mb = menu_rect
-        PAD = 10; EDGE = 5
-        def clamp(x, y):
-            return (max(EDGE, min(x, sw-btn_w-EDGE)),
-                    max(EDGE, min(y, sh-btn_h-EDGE)))
-        def overlaps(x, y):
-            return x < mr and x+btn_w > ml and y < mb and y+btn_h > mt
-        space = [mt-EDGE-PAD, sh-mb-EDGE-PAD, ml-EDGE-PAD, sw-mr-EDGE-PAD]
-        raw   = [(space[0]-btn_h, ml, mt-btn_h-PAD),
-                 (space[1]-btn_h, ml, mb+PAD),
-                 (space[2]-btn_w, ml-btn_w-PAD, mt),
-                 (space[3]-btn_w, mr+PAD, mt)]
-        raw.sort(key=lambda c: c[0], reverse=True)
-        for _, rx, ry in raw:
-            cx, cy = clamp(rx, ry)
-            if not overlaps(cx, cy):
-                return cx, cy
-        _, rx, ry = raw[0]
-        return clamp(rx, ry)
+        GAP = 8
+        by = max(g.top(), min(y - h // 2, g.bottom() - h))
+
+        # Menus open FROM the click point: cursor sits on one vertical
+        # border of the menu. Prefer the border the cursor is nearest —
+        # that's directly beside the click.
+        left_x, right_x = ml - w - GAP, mr + GAP
+        order = ([left_x, right_x] if (x - ml) <= (mr - x)
+                 else [right_x, left_x])
+        for bx in order:
+            if g.left() <= bx and bx + w <= g.right():
+                return bx, by
+
+        # No room on either side (menu spans the screen) → just outside
+        # the top/bottom border nearest the cursor.
+        bx = max(g.left(), min(x - w // 2, g.right() - w))
+        top_y, bot_y = mt - h - GAP, mb + GAP
+        vorder = ([top_y, bot_y] if (y - mt) <= (mb - y)
+                  else [bot_y, top_y])
+        for vy in vorder:
+            if g.top() <= vy and vy + h <= g.bottom():
+                return bx, vy
+
+        return self._beside_cursor(x, y, w, h, g)   # pathological fallback
+
+    def _beside_cursor(self, x, y, w, h, g):
+        """No menu rect detected: sit beside the cursor on the side the
+        menu won't occupy. Windows menus open RIGHTWARD from the click
+        when there's room, so the safe side is LEFT of the cursor —
+        unless the click is near the right screen edge (menu opens left,
+        so we go right). If NEITHER side has room, escape vertically:
+        just above the click, since menus open downward from it —
+        clamping horizontally instead would land inside the menu."""
+        GAP = 12
+        MENU_W = 220        # typical context-menu width
+        opens_right = (g.right() - x) >= MENU_W
+        if opens_right:
+            bx = x - w - GAP
+            by = y - h // 2
+        else:
+            bx = x + GAP
+            if bx + w <= g.right():
+                by = y - h // 2
+            else:                     # no room beside — go above the click
+                bx = g.right() - w
+                by = y - h - GAP
+                if by < g.top():      # top-right corner: below instead
+                    by = y + GAP
+        bx = max(g.left(), min(bx, g.right() - w))
+        by = max(g.top(), min(by, g.bottom() - h))
+        return bx, by
 
     def enterEvent(self, e):
         self._lbl.setStyleSheet(self._lbl.styleSheet().replace(OVERLAY_BG, OVERLAY_HOVER))
@@ -196,10 +254,11 @@ class ContextMenu:
         self.running = False
         self._uninstall_mouse_hook()
         self._remove_from_registry()
-        try:
-            keyboard.remove_hotkey(HOTKEY)
-        except Exception:
-            pass
+        for combo in getattr(self, "_hotkeys", {}).values():
+            try:
+                keyboard.remove_hotkey(combo)
+            except Exception:
+                pass
         print("Context menu removed.")
 
     # ── Overlay ───────────────────────────────────────────────────────────────
@@ -210,6 +269,7 @@ class ContextMenu:
         self._signals.show_overlay.connect(self._on_show_overlay)
         self._signals.hide_overlay.connect(self._on_hide_overlay)
         self._signals.hide_popup_if_outside.connect(self._on_hide_popup_if_outside)
+        self._signals.run_action.connect(self._dispatch_action)
 
     def _on_show_overlay(self, x, y, menu_rect):
         if self._overlay:
@@ -350,17 +410,27 @@ class ContextMenu:
                         ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
                         ("dwExtraInfo", ctypes.POINTER(wintypes.ULONG))]
 
+        # Imported here (not at module top) purely for the hook's benefit
+        from dropdown_popup import _DRAG_STATE
+
         def hook_proc(nCode, wParam, lParam):
-            try:
-                if nCode >= 0:
+            # ── HOT PATH ──  This runs for EVERY mouse event on the
+            # system, including every mouse-move. Anything beyond the two
+            # button events must bail with nothing but an int compare:
+            # per-move Python work adds system-wide cursor latency, which
+            # made drag-and-drop lag terribly and could stall OLE drops.
+            if (nCode >= 0
+                    and (wParam == WM_RBUTTONUP or wParam == WM_LBUTTONDOWN)
+                    and not _DRAG_STATE["active"]):
+                try:
                     ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
                     x, y = ms.pt.x, ms.pt.y
                     if wParam == WM_RBUTTONUP:
                         self._show_overlay(x, y)
-                    elif wParam == WM_LBUTTONDOWN:
+                    else:
                         self._signals.hide_popup_if_outside.emit(x, y)
-            except Exception as e:
-                print(f"Hook proc error: {e}")
+                except Exception as e:
+                    print(f"Hook proc error: {e}")
             return user32.CallNextHookEx(self.hook_id, nCode, wParam, lParam)
 
         self._hook_proc_ref = HOOKPROC(hook_proc)
@@ -388,19 +458,124 @@ class ContextMenu:
     # ── Hotkey ────────────────────────────────────────────────────────────────
 
     def _setup_hotkey(self):
-        try:
-            keyboard.add_hotkey(HOTKEY, self._on_hotkey_triggered, suppress=True)
-            print(f"Hotkey registered: {HOTKEY}")
-        except Exception as e:
-            print(f"Hotkey error: {e}")
+        """Bind every configurable shortcut. Combos come from settings
+        (Settings → Shortcuts) with SHORTCUT_DEFS defaults."""
+        self._hotkeys = {}   # settings_key → bound combo
+        for key, _label, default in SHORTCUT_DEFS:
+            try:
+                combo = self.history.settings.get(key, default) or default
+            except Exception:
+                combo = default
+            try:
+                keyboard.add_hotkey(combo, self._make_hotkey_cb(key),
+                                    suppress=True)
+                self._hotkeys[key] = combo
+                print(f"Hotkey registered: {combo}  ({key})")
+            except Exception as e:
+                print(f"Hotkey error for '{combo}' ({key}): {e}")
 
-    def _on_hotkey_triggered(self):
+    def _make_hotkey_cb(self, key: str):
+        # Hotkey callbacks run on the keyboard library's thread — emit a
+        # signal so the action executes on the Qt main thread.
+        return lambda: self._signals.run_action.emit(key)
+
+    def set_hotkey(self, key: str, combo: str) -> bool:
+        """Re-bind one shortcut live (Settings → Shortcuts). Returns True
+        on success; on failure the old binding is restored."""
+        old = self._hotkeys.get(key) if hasattr(self, "_hotkeys") else None
+        if not hasattr(self, "_hotkeys"):
+            self._hotkeys = {}
+        if old:
+            try:
+                keyboard.remove_hotkey(old)
+            except Exception:
+                pass
+        try:
+            keyboard.add_hotkey(combo, self._make_hotkey_cb(key), suppress=True)
+            self._hotkeys[key] = combo
+            print(f"Hotkey registered: {combo}  ({key})")
+            return True
+        except Exception as e:
+            print(f"Hotkey error for '{combo}' ({key}): {e}")
+            if old:   # restore the previous working binding
+                try:
+                    keyboard.add_hotkey(old, self._make_hotkey_cb(key),
+                                        suppress=True)
+                    self._hotkeys[key] = old
+                except Exception:
+                    self._hotkeys.pop(key, None)
+            return False
+
+    # ── Hotkey actions (all run on the Qt main thread) ───────────────────────
+
+    def _dispatch_action(self, key: str):
+        try:
+            if key == "hotkey_open":
+                self._action_open()
+            elif key == "hotkey_pause":
+                self._action_toggle_pause()
+            elif key == "hotkey_snippet":
+                self._action_new_snippet()
+            elif key == "hotkey_clear":
+                self._action_clear_history()
+            elif key == "hotkey_profile":
+                self._action_next_profile()
+        except Exception as e:
+            print(f"[ClipDrop] Hotkey action '{key}' failed: {e}")
+
+    def _action_open(self):
         try:
             self.popup._paste_target = win32gui.GetForegroundWindow()
         except Exception:
             self.popup._paste_target = None
         x, y = pyautogui.position()
         self.popup.show(x, y)
+
+    def _action_toggle_pause(self):
+        watcher = getattr(self.popup, "watcher", None)
+        if watcher is None:
+            return
+        watcher.paused = not watcher.paused
+        self.popup._show_toast(
+            "⏸ Clipboard capture paused" if watcher.paused
+            else "▶ Clipboard capture resumed")
+
+    def _action_new_snippet(self):
+        from snippet_window import SnippetWindow
+        win = getattr(self, "_snippet_win", None)
+        if win is not None and win.isVisible():
+            win.raise_()
+            win.activateWindow()
+            return
+        self._snippet_win = SnippetWindow(self.history, popup=self.popup)
+        self._snippet_win.show()
+        self._snippet_win.activateWindow()
+
+    def _action_clear_history(self):
+        # Destructive — a stray hotkey press must not wipe everything.
+        reply = QMessageBox.question(
+            None, "Clear History",
+            "Clear ALL clipboard history?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.history.clear_all()
+        self.popup._refresh()          # no-op when the popup is closed
+        self.popup._show_toast("History cleared")
+
+    def _action_next_profile(self):
+        profiles = getattr(self.popup, "profiles", None)
+        if profiles is None:
+            return
+        profs = profiles.get_all_profiles()
+        if not profs:
+            return
+        active = profiles.get_active_profile()["id"]
+        idx    = next((i for i, p in enumerate(profs) if p["id"] == active), 0)
+        nxt    = profs[(idx + 1) % len(profs)]
+        profiles.set_active(nxt["id"])
+        self.popup._refresh()          # no-op when the popup is closed
+        self.popup._show_toast(f"Profile: {nxt['name']}")
 
     # ── Registry ──────────────────────────────────────────────────────────────
 

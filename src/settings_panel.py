@@ -12,9 +12,12 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QSlider,
     QListWidget, QListWidgetItem, QFrame,
     QInputDialog, QMessageBox, QApplication, QScrollArea,
+    QKeySequenceEdit,
 )
-from PyQt6.QtCore    import Qt, QTimer, QEvent
-from PyQt6.QtGui     import QFont, QIntValidator, QCursor
+from PyQt6.QtCore    import Qt, QTimer, QEvent, QVariantAnimation
+from PyQt6.QtGui     import QFont, QIntValidator, QCursor, QKeySequence
+
+import math
 
 APP_NAME    = "ClipDrop"
 APP_VERSION = "1.0.0"
@@ -103,6 +106,332 @@ def _scrollbar_qss(C: dict) -> str:
         f"{{background:none;}}")
 
 
+# ── Shortcuts ────────────────────────────────────────────────────────────────
+# The canonical shortcut table lives in context_menu.py (which owns the
+# actual bindings). The Shortcuts window builds its rows from it.
+try:
+    from context_menu import SHORTCUT_DEFS
+except Exception:   # import edge in isolated tests
+    SHORTCUT_DEFS = [
+        ("hotkey_open", "Open ClipDrop popup window", "ctrl+shift+v"),
+    ]
+
+# Combos already taken by Windows or near-universal app functions.
+# Assigning one of these gets a WARNING (not a block — the binding wins
+# system-wide via the low-level hook, but the user should know what
+# they're stealing).
+KNOWN_COMBOS = {
+    "ctrl+c": "Copy",              "ctrl+v": "Paste",
+    "ctrl+x": "Cut",               "ctrl+z": "Undo",
+    "ctrl+y": "Redo",              "ctrl+a": "Select All",
+    "ctrl+s": "Save",              "ctrl+p": "Print",
+    "ctrl+f": "Find",              "ctrl+w": "Close Tab",
+    "ctrl+t": "New Tab",           "ctrl+n": "New Window",
+    "alt+f4": "Close Window",      "alt+tab": "Switch Windows",
+    "ctrl+shift+esc": "Task Manager",
+    "ctrl+alt+del": "Security Screen",
+    "f1": "Help",                  "f5": "Refresh",
+    "win+l": "Lock PC",            "win+d": "Show Desktop",
+}
+
+
+def _titlebar_dark(widget, dark: bool):
+    """Match a window's native title bar to the theme via DWM
+    (Win10 1903+ / Win11; silent no-op elsewhere)."""
+    try:
+        import ctypes
+        val  = ctypes.c_int(1 if dark else 0)
+        hwnd = int(widget.winId())
+        for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (19 pre-20H1)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(val), 4) == 0:
+                break
+    except Exception:
+        pass
+
+
+class ShortcutsWindow(QWidget):
+    """Shortcut management window (Settings → Shortcuts).
+
+    Lists every entry of SHORTCUT_DEFS with a key-capture field, per-row
+    reset, and a Save that re-binds live through the running ContextMenu
+    (via the app-level 'clipdrop_context' property).
+    """
+
+    def __init__(self, history_manager, parent=None):
+        super().__init__(parent,
+                         Qt.WindowType.Window |
+                         Qt.WindowType.WindowStaysOnTopHint |
+                         Qt.WindowType.WindowCloseButtonHint)
+        self.history = history_manager
+        self._theme  = history_manager.settings.get("theme", "dark")
+        self.C       = DARK if self._theme == "dark" else LIGHT
+        self._edits       = {}     # settings_key → QKeySequenceEdit
+        self._listen_btns = {}     # settings_key → listen QPushButton
+        self._edit_owner  = {}     # QKeySequenceEdit → settings_key
+        self._prev_seq    = {}     # settings_key → sequence before listening
+        self._labels      = {k: lbl for k, lbl, _ in SHORTCUT_DEFS}
+        self._listening_key = None
+
+        # Pulse animation for the active listen button (loops until a
+        # combo is captured or focus leaves the field)
+        self._pulse = QVariantAnimation(self)
+        self._pulse.setDuration(900)
+        self._pulse.setStartValue(0.0)
+        self._pulse.setEndValue(1.0)
+        self._pulse.setLoopCount(-1)
+        self._pulse.valueChanged.connect(self._on_pulse)
+
+        self.setWindowTitle("ClipDrop Shortcuts")
+        self.setFixedWidth(470)
+        self._build()
+
+        self.adjustSize()
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        fg = self.frameGeometry()
+        fg.moveCenter(screen.availableGeometry().center())
+        self.move(fg.topLeft())
+        _titlebar_dark(self, self._theme == "dark")
+
+    def _build(self):
+        C = self.C
+        self.setStyleSheet(f"QWidget {{background:{C['bg']};}} "
+                           f"QLabel {{color:{C['text']};background:transparent;}}")
+
+        main = QVBoxLayout(self)
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+
+        hdr = QLabel("⌨️  Shortcuts", self)
+        hdr.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.setFixedHeight(44)
+        hdr.setStyleSheet(
+            f"background:{_grad_v(C['accent_hover'], _shade(C['accent'], -0.18))};"
+            f"color:white;border-bottom:1px solid rgba(0,0,0,90);")
+        main.addWidget(hdr)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(16, 12, 16, 12)
+        body.setSpacing(8)
+
+        sub = QLabel("Click ⏺ (or the field) and press the key combination "
+                     "you want — the button pulses while listening. "
+                     "Save applies immediately.", self)
+        sub.setWordWrap(True)
+        sub.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+        body.addWidget(sub)
+
+        for key, label, default in SHORTCUT_DEFS:
+            row = QWidget(self); row.setStyleSheet(f"background:{C['bg']};")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0, 4, 0, 4); rl.setSpacing(8)
+
+            lbl = QLabel(label, row)
+            lbl.setStyleSheet(f"color:{C['text']};background:transparent;")
+            rl.addWidget(lbl, 1)
+
+            edit = QKeySequenceEdit(row)
+            try:                       # Qt ≥ 6.4 — capture ONE combo only
+                edit.setMaximumSequenceLength(1)
+            except AttributeError:
+                pass
+            current = self.history.settings.get(key, default) or default
+            edit.setKeySequence(QKeySequence(current))
+            edit.setFixedWidth(130)
+            # NOTE: QKeySequenceEdit renders through an INTERNAL QLineEdit —
+            # styling only the outer widget leaves the text in the default
+            # (dark-on-dark) palette. The child selector is what makes the
+            # combo text actually visible.
+            edit.setStyleSheet(f"""
+                QKeySequenceEdit {{background:{C['bg_input']};
+                    border:1px solid {C['border']};border-radius:4px;
+                    padding:2px 4px;}}
+                QKeySequenceEdit QLineEdit {{background:transparent;
+                    color:{C['text']};border:none;
+                    font-family:'Segoe UI';font-size:9pt;}}
+            """)
+            self._edits[key] = edit
+            self._edit_owner[edit] = key
+            edit.installEventFilter(self)     # focus in/out drives listening
+            edit.editingFinished.connect(
+                lambda k=key: self._set_listening(k, False))
+            # Live conflict warning the moment a combo is captured
+            edit.keySequenceChanged.connect(
+                lambda _seq, k=key: self._check_conflicts(k))
+            rl.addWidget(edit)
+
+            listen = QPushButton("⏺", row)
+            listen.setFixedWidth(30)
+            listen.setToolTip("Listen for a new key combination")
+            listen.setCursor(Qt.CursorShape.PointingHandCursor)
+            listen.setStyleSheet(_btn_style(C["bg_section"], C["accent"], C["text_dim"]))
+            listen.clicked.connect(lambda _=False, k=key: self._begin_listen(k))
+            self._listen_btns[key] = listen
+            rl.addWidget(listen)
+
+            reset = QPushButton("↺", row)
+            reset.setFixedWidth(30)
+            reset.setToolTip(f"Reset to {default}")
+            reset.setStyleSheet(_btn_style(C["bg_section"], C["accent"], C["text_dim"]))
+            reset.clicked.connect(
+                lambda _=False, e=edit, d=default: e.setKeySequence(QKeySequence(d)))
+            rl.addWidget(reset)
+            body.addWidget(row)
+
+        # Footer: feedback + Save/Close
+        foot = QWidget(self); foot.setStyleSheet(f"background:{C['bg']};")
+        fl = QHBoxLayout(foot); fl.setContentsMargins(0, 8, 0, 0); fl.setSpacing(8)
+        self._feedback_lbl = QLabel("", foot)
+        self._feedback_lbl.setStyleSheet(f"color:{C['success']};background:transparent;")
+        fl.addWidget(self._feedback_lbl, 1)
+        save = QPushButton("Save", foot)
+        save.setFixedWidth(90)
+        save.setStyleSheet(_btn_style(C["accent"], C["accent_hover"]))
+        save.clicked.connect(self._save)
+        fl.addWidget(save)
+        close = QPushButton("Close", foot)
+        close.setFixedWidth(90)
+        close.setStyleSheet(_btn_style(C["bg_section"], C["accent"], C["text_dim"]))
+        close.clicked.connect(self.close)
+        fl.addWidget(close)
+        body.addWidget(foot)
+
+        main.addLayout(body)
+
+    # ── Listening state (pulsing ⏺ button) ───────────────────────────────────
+
+    def eventFilter(self, obj, ev):
+        key = self._edit_owner.get(obj)
+        if key is not None:
+            if ev.type() == QEvent.Type.FocusIn:
+                self._set_listening(key, True)
+            elif ev.type() == QEvent.Type.FocusOut:
+                self._set_listening(key, False)
+        return False
+
+    def _begin_listen(self, key: str):
+        edit = self._edits[key]
+        # Remember the current combo so an aborted capture restores it
+        self._prev_seq[key] = edit.keySequence()
+        edit.clear()
+        edit.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._set_listening(key, True)
+
+    def _set_listening(self, key: str, on: bool):
+        if on:
+            if self._listening_key == key:
+                return
+            self._stop_listen_visual()
+            self._listening_key = key
+            self._pulse.start()
+        else:
+            if self._listening_key != key:
+                return
+            self._stop_listen_visual()
+            # Aborted with an empty field → restore the previous combo
+            edit = self._edits[key]
+            if edit.keySequence().isEmpty() and key in self._prev_seq:
+                edit.setKeySequence(self._prev_seq[key])
+
+    def _stop_listen_visual(self):
+        self._pulse.stop()
+        k, self._listening_key = self._listening_key, None
+        if k is not None and k in self._listen_btns:
+            self._listen_btns[k].setStyleSheet(
+                _btn_style(self.C["bg_section"], self.C["accent"],
+                           self.C["text_dim"]))
+
+    def _on_pulse(self, v):
+        k = self._listening_key
+        if k is None:
+            return
+        # Smooth 0→1→0 wave per loop
+        s = (1 - math.cos(2 * math.pi * float(v))) / 2
+        col = _lerp(self.C["bg_section"], self.C["accent"], s)
+        self._listen_btns[k].setStyleSheet(
+            f"QPushButton {{background:{col};color:white;border-radius:4px;"
+            f"padding:5px 0;border:1px solid {self.C['accent']};"
+            f"font-size:9pt;}}")
+
+    # ── Conflict warnings (live, on capture) ─────────────────────────────────
+
+    def _combo_of(self, key: str) -> str:
+        return self._edits[key].keySequence().toString().replace(" ", "").lower()
+
+    def _mark_edit(self, key: str, conflict: bool):
+        C = self.C
+        border = C["danger"] if conflict else C["border"]
+        self._edits[key].setStyleSheet(f"""
+            QKeySequenceEdit {{background:{C['bg_input']};
+                border:1px solid {border};border-radius:4px;
+                padding:2px 4px;}}
+            QKeySequenceEdit QLineEdit {{background:transparent;
+                color:{C['text']};border:none;
+                font-family:'Segoe UI';font-size:9pt;}}
+        """)
+
+    def _check_conflicts(self, key: str):
+        """Warn immediately when a freshly captured combo is already
+        assigned to another ClipDrop action (field turns red) or is a
+        well-known Windows / app shortcut (warning only)."""
+        combo  = self._combo_of(key)
+        pretty = self._edits[key].keySequence().toString()
+        if not combo:
+            self._mark_edit(key, conflict=False)
+            return
+        # Taken by another ClipDrop action?
+        for other, _lbl, _d in SHORTCUT_DEFS:
+            if other != key and self._combo_of(other) == combo:
+                self._mark_edit(key, conflict=True)
+                self._feedback(
+                    f"⚠ {pretty} is already assigned to "
+                    f"“{self._labels.get(other, other)}”", ok=False)
+                return
+        self._mark_edit(key, conflict=False)
+        # Taken by Windows / a near-universal app function?
+        if combo in KNOWN_COMBOS:
+            self._feedback(
+                f"⚠ {pretty} is already in use by Windows "
+                f"({KNOWN_COMBOS[combo]}) — it will be overridden", ok=False)
+            return
+        self._feedback_lbl.setText("")   # conflict resolved — clear warning
+
+    # ── Save ─────────────────────────────────────────────────────────────────
+
+    def _feedback(self, msg: str, ok: bool = True):
+        col = self.C["success"] if ok else self.C["danger"]
+        self._feedback_lbl.setStyleSheet(f"color:{col};background:transparent;")
+        self._feedback_lbl.setText(msg)
+        QTimer.singleShot(2500, lambda: self._feedback_lbl.setText(""))
+
+    def _save(self):
+        # Pass 1: collect + validate every combo (no empties, no duplicates)
+        combos = {}
+        seen   = {}
+        for key, label, default in SHORTCUT_DEFS:
+            seq   = self._edits[key].keySequence().toString()   # "Ctrl+Shift+V"
+            combo = seq.replace(" ", "").lower()                # keyboard-lib format
+            if not combo:
+                self._feedback(f"'{label}' has no key set", ok=False)
+                return
+            if combo in seen:
+                self._feedback(f"{seq} is assigned twice", ok=False)
+                return
+            seen[combo] = key
+            combos[key] = (combo, seq)
+
+        # Pass 2: re-bind live; on any failure the old binding for that
+        # action is restored by set_hotkey and nothing further is saved.
+        ctx = QApplication.instance().property("clipdrop_context")
+        for key, (combo, seq) in combos.items():
+            if ctx is not None:
+                if not ctx.set_hotkey(key, combo):
+                    self._feedback(f"Could not bind {seq}", ok=False)
+                    return
+            self.history.save_setting(key, combo)
+        self._feedback("✓ Saved — active now")
+
+
 class SettingsPanel(QWidget):
     """Settings panel.
 
@@ -121,6 +450,7 @@ class SettingsPanel(QWidget):
         self.profiles = profile_manager
         self._theme   = history_manager.settings.get("theme", "dark")
         self.C        = DARK if self._theme == "dark" else LIGHT
+        self._shortcuts_win = None   # keep reference — prevents GC close
 
         self.setWindowTitle("ClipDrop Settings")
         self.setFixedWidth(420)
@@ -145,19 +475,8 @@ class SettingsPanel(QWidget):
         QApplication.instance().installEventFilter(self)
 
     def _apply_titlebar_theme(self):
-        """Match the native Windows title bar to the app theme via DWM
-        (DWMWA_USE_IMMERSIVE_DARK_MODE). Works on Win10 1903+ and Win11;
-        silently a no-op anywhere it isn't supported."""
-        try:
-            import ctypes
-            val  = ctypes.c_int(1 if self._theme == "dark" else 0)
-            hwnd = int(self.winId())
-            for attr in (20, 19):   # 19 = pre-20H1 builds
-                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                        hwnd, attr, ctypes.byref(val), 4) == 0:
-                    break
-        except Exception:
-            pass
+        """Match the native Windows title bar to the app theme."""
+        _titlebar_dark(self, self._theme == "dark")
 
     # ── Click-outside-to-close ────────────────────────────────────────────────
 
@@ -168,6 +487,11 @@ class SettingsPanel(QWidget):
                 and self.isVisible() and not self.isMinimized()):
             try:
                 gpos = event.globalPosition().toPoint()
+                # A click inside the Shortcuts window must not close us
+                sw = self._shortcuts_win
+                if (sw is not None and sw.isVisible()
+                        and sw.frameGeometry().contains(gpos)):
+                    return False
                 # Check this window and all its child widgets
                 if not self.geometry().contains(gpos):
                     # Allow clicks on QMessageBox / QInputDialog (they are
@@ -220,6 +544,8 @@ class SettingsPanel(QWidget):
         scroll_lay.addWidget(self._section_appearance())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_behaviour())
+        scroll_lay.addWidget(self._divider())
+        scroll_lay.addWidget(self._section_shortcuts())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_history())
         if self.profiles:
@@ -362,6 +688,35 @@ class SettingsPanel(QWidget):
         self.history.save_setting("close_mode", mode)
         self._refresh_close_mode_buttons()
         self._apply_to_app()   # open popup re-evaluates its close mode
+
+    def _section_shortcuts(self) -> QWidget:
+        C = self.C
+        w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
+
+        lay.addWidget(self._heading("⌨️  Shortcuts"))
+        row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+        rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+        btn = QPushButton("Manage Shortcuts…", row)
+        btn.setFixedWidth(150)
+        btn.setStyleSheet(_btn_style(C["accent"], C["accent_hover"]))
+        btn.clicked.connect(self._open_shortcuts)
+        rl.addWidget(btn)
+        cur = self.history.settings.get("hotkey_open", "ctrl+shift+v")
+        cap = QLabel(f"Launch ClipDrop:  {cur.upper()}", row)
+        cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+        rl.addWidget(cap)
+        rl.addStretch()
+        lay.addWidget(row)
+        return w
+
+    def _open_shortcuts(self):
+        if self._shortcuts_win and self._shortcuts_win.isVisible():
+            self._shortcuts_win.raise_()
+            self._shortcuts_win.activateWindow()
+            return
+        self._shortcuts_win = ShortcutsWindow(self.history)
+        self._shortcuts_win.show()
 
     def _section_history(self) -> QWidget:
         C = self.C

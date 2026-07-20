@@ -9,8 +9,15 @@
 # UI components are created on the main thread.
 # ============================================================
 
+import os
 import threading
 import sys
+
+# Silence benign DirectWrite font warnings: Qt's glyph fallback (emoji in
+# labels) enumerates legacy Windows BITMAP fonts (8514oem, Fixedsys) that
+# DirectWrite cannot load. Text renders fine via the next fallback — the
+# console noise is useless and alarming, so drop that log category.
+os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import Qt
@@ -68,6 +75,8 @@ def main():
     # MUST be called on the main thread so QTimer / QWidget creation works.
     context = ContextMenu(history, popup)
     context.setup()
+    # Expose app-wide so the Shortcuts window can re-bind the hotkey live
+    app.setProperty("clipdrop_context", context)
 
     # Step 7: Tray Icon — start() schedules tray creation via QTimer;
     # must be called on the main thread.

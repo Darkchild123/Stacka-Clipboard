@@ -25,6 +25,7 @@ import win32clipboard
 import win32con
 import win32gui
 import pyautogui
+import keyboard
 
 from PIL import Image
 
@@ -37,11 +38,11 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
     QVariantAnimation, QEasingCurve, pyqtSignal, QObject, pyqtSlot,
-    QThread, QEvent,
+    QThread, QEvent, QUrl, QMimeData,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QFontMetrics,
-    QPixmap, QImage, QCursor, QIcon, QPalette, QPolygonF,
+    QPixmap, QImage, QCursor, QIcon, QPalette, QPolygonF, QDrag,
 )
 
 # ── Colour themes ────────────────────────────────────────────────────────────
@@ -150,17 +151,39 @@ def _scrollbar_qss(C: dict) -> str:
     handle_bot = _shade(C["accent"], -0.22)
     hover      = _shade(C["accent"], 0.32)
     return (
-        f"QScrollBar:vertical {{background:transparent;width:10px;"
+        f"QScrollBar:vertical {{background:transparent;width:13px;"
         f"margin:2px 2px 2px 0;border:none;}}"
         f"QScrollBar::handle:vertical {{"
         f"background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
         f"stop:0 {handle_top},stop:1 {handle_bot});"
-        f"border-radius:4px;min-height:28px;}}"
+        f"border-radius:5px;min-height:28px;}}"
         f"QScrollBar::handle:vertical:hover {{background:{hover};}}"
         f"QScrollBar::handle:vertical:pressed {{background:{C['accent_light']};}}"
         f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical {{height:0;}}"
         f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical "
         f"{{background:none;}}")
+
+def _activate_for_menu(widget):
+    """Make a window able to host a well-behaved QMenu.
+
+    Menus opened from a WS_EX_NOACTIVATE window can't establish their
+    mouse grab reliably: they don't dismiss on outside clicks and can
+    survive as stuck orphans on screen. Strip the flag and foreground
+    the owner just before menu.exec(); the paste worker re-foregrounds
+    the real paste target before any Ctrl+V, so pasting is unaffected.
+    """
+    try:
+        win = widget.window()
+        hwnd = int(win.winId())
+        ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+        if ex & win32con.WS_EX_NOACTIVATE:
+            win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE,
+                                   ex & ~win32con.WS_EX_NOACTIVATE)
+        win32gui.SetForegroundWindow(hwnd)
+        win.activateWindow()
+    except Exception:
+        pass
+
 
 def _set_no_activate(hwnd: int):
     """Apply WS_EX_NOACTIVATE so the window never steals keyboard focus."""
@@ -484,6 +507,41 @@ def _draw_icon_pixmap(icon_type: str, size: int = 32,
     return QPixmap.fromImage(qimg)
 
 
+# True while a drag-and-drop is in flight. Auto-close paths (panel leave
+# timers, hover-to-close polling) MUST stand down during a drag: QDrag.exec
+# runs a nested event loop inside the source widget's mouse-handling stack,
+# and destroying that widget mid-drag is a use-after-free hard crash.
+_DRAG_STATE = {"active": False}
+
+_TEXT_KINDS = ("text", "url", "code", "bash", "hex")
+
+
+def _mime_for_items(items: list) -> QMimeData:
+    """Build drag-and-drop payload for one or more clipboard items.
+
+    Files and images travel as file URLs (dropping on Explorer copies
+    them; editors take the paths), text kinds travel as plain text.
+    A mixed selection carries both — the drop target picks what it
+    understands.
+    """
+    md = QMimeData()
+    urls, texts = [], []
+    for it in items:
+        t = it.get("type")
+        c = it.get("content")
+        if t == "file" and isinstance(c, list):
+            urls.extend(QUrl.fromLocalFile(p) for p in c)
+        elif t == "image":
+            urls.append(QUrl.fromLocalFile(str(c)))
+        else:
+            texts.append(str(c))
+    if urls:
+        md.setUrls(urls)
+    if texts:
+        md.setText("\n".join(texts))
+    return md
+
+
 def _content_count(item: dict):
     """How many things are 'inside' a file item, or None if not applicable.
 
@@ -525,6 +583,8 @@ class ItemRowWidget(QWidget):
     sig_move_up = pyqtSignal(object)
     sig_move_dn = pyqtSignal(object)
     sig_rclick  = pyqtSignal(object, object)  # item, QPoint
+    sig_select  = pyqtSignal(object, object)  # item, row — Ctrl+click toggle
+    sig_drag    = pyqtSignal(object, object)  # item, row — drag threshold hit
 
     def __init__(self, item: dict, history, profiles, colours: dict, parent=None):
         super().__init__(parent)
@@ -545,9 +605,11 @@ class ItemRowWidget(QWidget):
         self._anim.setEasingCurve(QEasingCurve.Type.OutExpo)
         self._anim.valueChanged.connect(self._on_anim_value)
 
-        # Drag state
-        self._press_pos   = None
-        self._is_dragging = False
+        # Drag / selection state
+        self._press_pos    = None
+        self._is_dragging  = False
+        self._drag_started = False
+        self._selected     = False
 
         self._build()
         self.setFixedHeight(ITEM_HEIGHT)
@@ -570,6 +632,8 @@ class ItemRowWidget(QWidget):
         item = self.item
         pinned = self._is_pinned()
         self._base_bg = C["bg_pinned"] if pinned else C["bg_item"]
+
+        self._orig_base = self._base_bg   # kept — selection tints from this
 
         main = QHBoxLayout(self)
         main.setContentsMargins(0, 0, 0, 0)
@@ -696,10 +760,22 @@ class ItemRowWidget(QWidget):
     # ── Background ───────────────────────────────────────────────────────────
 
     def _apply_bg(self, hex_col: str):
-        self.setStyleSheet(f"background:{hex_col};")
+        # Selected rows carry an accent outline on top of their tint
+        border = (f"border:1px solid {self.C['accent']};" if self._selected
+                  else "border:none;")
+        self.setStyleSheet(f"background:{hex_col};{border}")
         # Keep labels transparent so row bg shows through
         for lbl in [self._preview_lbl, self._source_lbl, self._thumb]:
             lbl.setStyleSheet(lbl.styleSheet().split(";")[0] + ";background:transparent;")
+
+    # ── Multi-selection (Ctrl+click) ─────────────────────────────────────────
+
+    def set_selected(self, selected: bool):
+        self._selected = selected
+        self._base_bg  = (_hex_lerp(self._orig_base, self.C["accent"], 0.28)
+                          if selected else self._orig_base)
+        # Repaint at the current hover state
+        self._apply_bg(_hex_lerp(self._base_bg, self.C["bg_hover"], self._anim_t))
 
     # ── Hover animation ──────────────────────────────────────────────────────
 
@@ -739,8 +815,13 @@ class ItemRowWidget(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._press_pos   = event.globalPosition().toPoint()
-            self._is_dragging = False
+            self._press_pos    = event.globalPosition().toPoint()
+            self._is_dragging  = False
+            self._drag_started = False
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                # Ctrl+click — toggle multi-selection, never paste
+                itm = self.item
+                QTimer.singleShot(0, lambda: self.sig_select.emit(itm, self))
         elif event.button() == Qt.MouseButton.RightButton:
             pt  = event.globalPosition().toPoint()
             itm = self.item
@@ -755,6 +836,11 @@ class ItemRowWidget(QWidget):
             delta = event.globalPosition().toPoint() - self._press_pos
             if not self._is_dragging and (abs(delta.x()) > 6 or abs(delta.y()) > 6):
                 self._is_dragging = True
+                if not self._drag_started:
+                    # Start a real OS drag — synchronously, inside the move
+                    # handler (the standard Qt drag-and-drop pattern).
+                    self._drag_started = True
+                    self.sig_drag.emit(self.item, self)
         try:
             super().mouseMoveEvent(event)
         except RuntimeError:
@@ -762,11 +848,13 @@ class ItemRowWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            if not self._is_dragging:
+            ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            if not self._is_dragging and not ctrl:
                 itm = self.item
                 QTimer.singleShot(0, lambda: self.sig_paste.emit(itm))
-            self._press_pos   = None
-            self._is_dragging = False
+            self._press_pos    = None
+            self._is_dragging  = False
+            self._drag_started = False
         try:
             super().mouseReleaseEvent(event)
         except RuntimeError:
@@ -978,22 +1066,25 @@ class SidePanelWidget(QWidget):
         self._title        = title
         self._menu_open    = False          # suppress leave-close while a menu shows
         self._last_btn     = Qt.MouseButton.LeftButton
+        self._sel_at_press = []             # selection snapshot (see eventFilter)
         self._close_timer  = QTimer(self)
         self._close_timer.setSingleShot(True)
         self._close_timer.timeout.connect(self._close_if_cursor_outside)
 
         # Rounded card + Qt drop shadow inside transparent margins —
-        # same elevation recipe as the main popup.
+        # same elevation recipe as the main popup. Same INVARIANT too:
+        # blur + |offset| must fit inside the margins or layered-window
+        # updates get rejected and the panel freezes.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 6, 8, 11)
+        outer.setContentsMargins(14, 10, 14, 17)
         card = QWidget(self)
         card.setObjectName("panel_card")
         card.setStyleSheet(
             f"QWidget#panel_card {{background:{colours['bg']};"
             f"border:1px solid {colours['border']};border-radius:8px;}}")
         _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(18)
-        _shadow.setOffset(0, 3)
+        _shadow.setBlurRadius(11)     # 11 + offset 2 < margins (14/10/17)
+        _shadow.setOffset(0, 2)
         _shadow.setColor(QColor(0, 0, 0, 140))
         card.setGraphicsEffect(_shadow)
         outer.addWidget(card)
@@ -1002,23 +1093,47 @@ class SidePanelWidget(QWidget):
         lay.setContentsMargins(1, 1, 1, 7)   # bottom pad = rounded base
         lay.setSpacing(0)
 
-        # Header — nested folder panels show the folder name
+        # Header row — title plus a "✕ clear" badge that appears while a
+        # Ctrl+click multi-selection is active
         hdr_text = (f"  {title} — {len(files)} files" if title
                     else f"  {len(files)} files")
-        hdr = QLabel(hdr_text, self)
-        hdr.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
-        hdr.setFixedHeight(28)
-        hdr.setStyleSheet(
+        hdr_row = QWidget(self)
+        hdr_row.setFixedHeight(28)
+        hdr_row.setStyleSheet(
             f"background:{_grad_v(colours['accent_light'], _shade(colours['accent'], -0.18))};"
-            f"color:white;padding-left:6px;"
             f"border-top-left-radius:7px;"
             f"border-top-right-radius:7px;"
             f"border-bottom:1px solid rgba(0,0,0,90);")
-        lay.addWidget(hdr)
+        hl = QHBoxLayout(hdr_row)
+        hl.setContentsMargins(6, 0, 8, 0)
+        hl.setSpacing(6)
+
+        hdr = QLabel(hdr_text, hdr_row)
+        hdr.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        hdr.setStyleSheet("color:white;background:transparent;")
+        hl.addWidget(hdr)
+        hl.addStretch()
         self._hdr = hdr   # kept so per-file delete can update the count live
 
-        # Scrollable list
+        badge = QLabel("", hdr_row)
+        badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        badge.setStyleSheet("color:white;background:transparent;")
+        badge.setCursor(Qt.CursorShape.PointingHandCursor)
+        badge.setToolTip("Clear selection")
+        badge.mousePressEvent = lambda e: self._list.clearSelection()
+        badge.hide()
+        hl.addWidget(badge)
+        self._sel_badge = badge
+
+        lay.addWidget(hdr_row)
+
+        # Scrollable list — Ctrl+click multi-select. (Drag-out was tried
+        # here and scrapped: the low-level mouse hook adds per-event
+        # latency that makes native list drags lag badly.)
         self._list = QListWidget(self)
+        self._list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._list.itemSelectionChanged.connect(self._on_selection_changed)
         self._list.setStyleSheet(f"""
             QListWidget {{ background:{colours['bg']}; border:none; outline:none; }}
             QListWidget::item {{ height:{self.ROW_H}px; color:{colours['text']};
@@ -1059,14 +1174,44 @@ class SidePanelWidget(QWidget):
     def eventFilter(self, obj, ev):
         if ev.type() == QEvent.Type.MouseButtonPress:
             self._last_btn = ev.button()
+            if (ev.button() == Qt.MouseButton.LeftButton
+                    and not (ev.modifiers() & Qt.KeyboardModifier.ControlModifier)):
+                # Snapshot the multi-selection BEFORE Qt handles the press:
+                # ExtendedSelection collapses the selection to the clicked
+                # row on plain press, and itemClicked only fires afterwards.
+                # Without this, "click a selected row → paste all selected"
+                # would always see a single-item selection.
+                self._sel_at_press = [
+                    self._list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(self._list.count())
+                    if self._list.item(i).isSelected()]
         return False   # never consume — just observe
+
+    def _on_selection_changed(self):
+        """Show the header '✕ clear' badge while files are selected."""
+        n = len(self._list.selectedItems())
+        if n:
+            self._sel_badge.setText(f"✕ {n} selected")
+            self._sel_badge.show()
+        else:
+            self._sel_badge.hide()
 
     def _on_file_click(self, item: QListWidgetItem):
         # itemClicked fires for right-clicks too — those open the menu,
         # they must not paste.
         if self._last_btn != Qt.MouseButton.LeftButton:
             return
-        fp = item.data(Qt.ItemDataRole.UserRole)
+        # Ctrl+click is a selection toggle (ExtendedSelection), not a paste
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier:
+            return
+        fp  = item.data(Qt.ItemDataRole.UserRole)
+        # Clicking a row that was part of the multi-selection pastes ALL
+        # selected files (selection order = visible list order). The
+        # snapshot from eventFilter is used because Qt collapsed the real
+        # selection on mouse-press.
+        sel = self._sel_at_press
+        self._sel_at_press = []
+        paths = sel if (len(sel) > 1 and fp in sel) else [fp]
         self.close()
         # CRITICAL: defer the paste until this mouse-release event has fully
         # unwound. on_paste_file → _paste_item → _do_hide drops the last
@@ -1078,7 +1223,7 @@ class SidePanelWidget(QWidget):
         # Capture the callback locally so the lambda holds no reference
         # to this (soon to be deleted) panel.
         cb = self.on_paste_file
-        QTimer.singleShot(0, lambda: cb(fp))
+        QTimer.singleShot(0, lambda: cb(paths))
 
     def arm_close_timer(self):
         # While a context menu is open the mouse "leaves" the panel —
@@ -1097,6 +1242,8 @@ class SidePanelWidget(QWidget):
         re-verify before killing the window. Without this, hovering a
         non-folder row in the side list closed the child AND then the
         side list out from under the cursor."""
+        if _DRAG_STATE["active"]:
+            return   # NEVER destroy the drag-source window mid-drag
         try:
             gp = QCursor.pos()
             if self.isVisible() and self.frameGeometry().contains(gp):
@@ -1194,12 +1341,12 @@ class SidePanelWidget(QWidget):
         g = screen.availableGeometry()
         space_right = g.right() - my.right()
         space_left  = my.left() - g.left()
-        # Overlap the transparent shadow margins (8px each side) so the
+        # Overlap the transparent shadow margins (14px each side) so the
         # visible cards sit ~2px apart with no dead zone for the cursor.
         if space_right >= pw or space_right >= space_left:
-            px = my.right() - 14
+            px = my.right() - 26
         else:
-            px = my.left() - pw + 14
+            px = my.left() - pw + 26
         px = max(g.left(), min(px, g.right() - pw))
         # Align with the hovered row, clamped on-screen
         row_top = self._list.viewport().mapToGlobal(
@@ -1228,9 +1375,12 @@ class SidePanelWidget(QWidget):
                 QMenu::item:selected {{ background:{C['bg_hover']}; }}
             """)
 
-            # Send to profile ▸  (named profiles only)
-            profs = ([p for p in ctrl.profiles.get_all_profiles()
-                      if not p.get("built_in")] if ctrl.profiles else [])
+            # Send to profile ▸ — ALL profiles are valid targets here,
+            # including the active one and General. Unlike a main-list
+            # item, a file inside a multi-file entry is not individually
+            # IN any profile yet — sending it to General creates its own
+            # visible entry there; to a named profile, a hidden one.
+            profs = self._send_targets()
             if profs:
                 sub = menu.addMenu("Send to profile")
                 for prof in profs:
@@ -1245,6 +1395,7 @@ class SidePanelWidget(QWidget):
                 del_act = menu.addAction("Delete file")
                 del_act.setData(("delete", None, None))
 
+            _activate_for_menu(self)   # menu needs an ACTIVE owner to grab
             chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
         finally:
             self._menu_open = False
@@ -1311,23 +1462,36 @@ class SidePanelWidget(QWidget):
         self.controller.history._save_history()   # item dict lives in history
         self._populate_rows()   # re-sort: pinned to top, badge on/off
 
+    def _send_targets(self) -> list:
+        """Profiles offered in the per-file 'Send to profile' submenu."""
+        ctrl = self.controller
+        if ctrl is None or not getattr(ctrl, "profiles", None):
+            return []
+        return ctrl.profiles.get_all_profiles()
+
     def _send_file_to_profile(self, fp: str, profile_id: str, profile_name: str):
-        # Single files sent to a profile become their own hidden history
-        # entries (id = md5 of path) — visible in that profile, not General.
+        # Single files sent to a profile become their own history entries
+        # (id = md5 of path). Named profiles keep them hidden from General;
+        # sending to GENERAL itself un-hides the entry instead.
         ctrl  = self.controller
         hist  = ctrl.history
         fid   = hashlib.md5(fp.encode()).hexdigest()
-        if hist._find_by_id(fid) is None:
-            hist.items.insert(0, {
+        entry = hist._find_by_id(fid)
+        if entry is None:
+            entry = {
                 "id":      fid,
                 "type":    "file",
                 "content": [fp],
                 "source":  os.path.dirname(fp),
                 "pinned":  False,
                 "hidden":  True,
-            })
-            hist._save_history()
-        ctrl.profiles.add_item_to_profile(fid, profile_id)
+            }
+            hist.items.insert(0, entry)
+        if profile_id == "general":
+            entry["hidden"] = False
+        else:
+            ctrl.profiles.add_item_to_profile(fid, profile_id)
+        hist._save_history()
         ctrl._show_toast(f'Sent "{os.path.basename(fp)}" to "{profile_name}"')
         ctrl._refresh()
 
@@ -1359,6 +1523,9 @@ class _PopupSignals(QObject):
     """
     show_sig = pyqtSignal(int, int)   # x, y
     hide_sig = pyqtSignal()
+    esc_sig  = pyqtSignal()           # Escape pressed (global keyboard hook —
+                                      # QShortcut needs an ACTIVE window and
+                                      # the popup is WS_EX_NOACTIVATE)
 
 
 class _PasteWorker(QThread):
@@ -1492,12 +1659,21 @@ class DropdownPopup(QObject):
         self._paste_worker = None  # _PasteWorker QThread while a paste runs
         self._hover_timer = None   # cursor poll for hover-to-close mode
         self._hover_seen_inside = False
+        self._selected_ids = set() # Ctrl+click multi-selection (item ids)
         self._colours     = DARK   # Current theme dict
 
         # Thread-safe signals — connected to slots that run on this object's thread
         self._sig = _PopupSignals()
         self._sig.show_sig.connect(self._build_and_show)
         self._sig.hide_sig.connect(self._do_hide)
+        self._sig.esc_sig.connect(self._on_escape)
+        # Global Escape (unsuppressed — other apps still get theirs).
+        # A QShortcut can't do this job: it needs an active window and
+        # the popup never activates.
+        try:
+            keyboard.add_hotkey("esc", self._sig.esc_sig.emit, suppress=False)
+        except Exception:
+            pass
 
     # ── Public API ───────────────────────────────────────────────────────────
 
@@ -1552,16 +1728,21 @@ class DropdownPopup(QObject):
         # NOTE: popup.show() is intentionally called AFTER the layout is fully built
         # and positioned — see the bottom of this method. Do NOT move it up here.
 
+        # INVARIANT: shadow blur + |offset| MUST fit inside these margins.
+        # The effect's repaint region extends the card by ~blurRadius; if
+        # that overflows the window rect, Windows rejects the layered-
+        # window update outright (UpdateLayeredWindowIndirect "parameter
+        # is incorrect") and the popup freezes showing stale content.
         outer = QVBoxLayout(popup)
-        outer.setContentsMargins(10, 8, 10, 14)   # room for the shadow
+        outer.setContentsMargins(18, 14, 18, 22)
         card = QWidget(popup)
         card.setObjectName("clipdrop_card")
         card.setStyleSheet(
             f"QWidget#clipdrop_card {{background:{C['bg']};"
             f"border:1px solid {C['border']};border-radius:10px;}}")
         _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(22)
-        _shadow.setOffset(0, 4)
+        _shadow.setBlurRadius(15)     # 15 + offset 3 < margins (18/14/22)
+        _shadow.setOffset(0, 3)
         _shadow.setColor(QColor(0, 0, 0, 150))
         card.setGraphicsEffect(_shadow)
         outer.addWidget(card)
@@ -1614,19 +1795,25 @@ class DropdownPopup(QObject):
         scroll.setFixedHeight(max_h)
         main_lay.addWidget(scroll)
         self._scroll = scroll   # kept so _refresh can resize in place
+        # Chrome height = everything around the scroll area (header, search
+        # bar, separators, margins). Measured HERE, where the fresh layout
+        # is known-correct — _refresh derives exact window heights from it
+        # instead of trusting sizeHint(), which can be stale mid-mutation
+        # and leaves the window too tall (content then spreads with gaps).
+        self._chrome_h = None   # set right after adjustSize() below
 
         # Connect search
         self._search_edit.textChanged.connect(self._on_search)
 
-        # Escape to close
-        from PyQt6.QtGui import QKeySequence, QShortcut
-        sc = QShortcut(QKeySequence("Escape"), popup)
-        sc.activated.connect(self.hide)
+        # Escape is handled by the global keyboard hook (see __init__) —
+        # a QShortcut would only fire while the window is active, and
+        # this window deliberately never activates.
 
         # Build is complete — now size, position, THEN show.
         # Showing AFTER positioning means the window appears exactly where
         # it should on the first paint — no flash at 0,0 first.
         popup.adjustSize()
+        self._chrome_h = popup.height() - max_h   # see note at _scroll above
         self._position_popup(x, y)
         popup.show()
         # WS_EX_NOACTIVATE — winId is valid now that show() has been called.
@@ -1669,12 +1856,16 @@ class DropdownPopup(QObject):
             lay.addWidget(prof_btn)
             self._prof_btn = prof_btn
 
-        # Item count
+        # Item count — doubles as the "clear selection" button when a
+        # Ctrl+click multi-selection is active ("✕ N selected")
         count_lbl = QLabel(f"{len(items)} items", hdr)
         count_lbl.setFont(QFont("Segoe UI", 8))
         count_lbl.setStyleSheet("color:#c7d2fe;background:transparent;")
+        count_lbl.mousePressEvent = lambda e: self._clear_selection()
         lay.addWidget(count_lbl)
         self._count_lbl = count_lbl
+        if self._selected_ids:          # restore "N selected" after rebuilds
+            self._update_count_label()
 
         # Make header draggable
         self._drag_pos = None
@@ -1694,6 +1885,10 @@ class DropdownPopup(QObject):
 
     def _build_search(self, parent, C) -> tuple:
         bar = QWidget(parent)
+        # FIXED height — without it the bar is the only stretchable child
+        # and absorbs all leftover space when the list shrinks (switching
+        # to a profile with few items made it fill half the window).
+        bar.setFixedHeight(34)
         # Inset "channel" look: darker recessed field, shadow line above,
         # faint highlight below — reads as pressed-into the surface.
         bar.setStyleSheet(
@@ -1768,11 +1963,15 @@ class DropdownPopup(QObject):
 
     def _populate_list(self, items: list):
         C = self._colours
-        # Clear existing rows
+        # Clear existing rows. hide() BEFORE deleteLater: removed widgets
+        # stay parented (and paintable) until the deferred delete runs —
+        # visible ghosts of the old profile otherwise.
         while self._list_lay.count():
             child = self._list_lay.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            w = child.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
 
         for item in items:
             row = ItemRowWidget(item, self.history, self.profiles, C, self._list_container)
@@ -1782,6 +1981,10 @@ class DropdownPopup(QObject):
             row.sig_move_up.connect(self._move_up)
             row.sig_move_dn.connect(self._move_down)
             row.sig_rclick.connect(self._show_send_to_menu)
+            row.sig_select.connect(self._toggle_select)
+            row.sig_drag.connect(self._start_drag)
+            if item["id"] in self._selected_ids:
+                row.set_selected(True)   # selection survives list rebuilds
 
             # Multi-file side panel on hover
             files = item.get("content", [])
@@ -1833,12 +2036,18 @@ class DropdownPopup(QObject):
                 pass
             self._side_panel = None
 
-        def paste_single_file(fp):
+        def paste_single_file(fps):
+            # Accepts one path or a list — a click on a multi-selected
+            # row pastes every selected file as ONE clipboard payload.
+            if isinstance(fps, str):
+                fps = [fps]
+            if not fps:
+                return
             file_item = {
-                "id":      hashlib.md5(fp.encode()).hexdigest(),
+                "id":      hashlib.md5("|".join(fps).encode()).hexdigest(),
                 "type":    "file",
-                "content": [fp],
-                "source":  os.path.dirname(fp),
+                "content": list(fps),
+                "source":  os.path.dirname(fps[0]),
             }
             # Route through _paste_item: hides popup + side panel, then
             # runs the paste on the worker thread (never blocks the UI).
@@ -1863,15 +2072,15 @@ class DropdownPopup(QObject):
             space_right = g.right() - pop.right()
             space_left  = pop.left() - g.left()
 
-            # Both windows carry transparent shadow margins (popup 10px,
-            # panel 8px) — overlap the frames so the visible cards sit
+            # Both windows carry transparent shadow margins (popup 18px,
+            # panel 14px) — overlap the frames so the visible cards sit
             # ~2px apart AND the cursor never crosses a dead zone between
             # windows (transparent pixels are click-through, so overlap
             # is harmless).
             if space_right >= pw or space_right >= space_left:
-                px = pop.right() - 16           # flyout to the right
+                px = pop.right() - 30           # flyout to the right
             else:
-                px = pop.left() - pw + 16       # flyout to the left
+                px = pop.left() - pw + 30       # flyout to the left
             px = max(g.left(), min(px, g.right() - pw))
 
             # Align with the hovered row, clamped so the panel stays on-screen
@@ -1924,9 +2133,11 @@ class DropdownPopup(QObject):
     # ── Profile menu ──────────────────────────────────────────────────────────
 
     def _show_profile_menu(self, btn: QLabel):
-        if not self.profiles:
+        if not self.profiles or not self._popup:
             return
-        menu = QMenu()
+        # Parent to the popup: if the popup closes, the menu dies with it
+        # instead of surviving as a stuck orphan on screen.
+        menu = QMenu(self._popup)
         menu.setStyleSheet(f"""
             QMenu {{ background:{self._colours['bg_item']}; color:{self._colours['text']};
                      border:1px solid {self._colours['border']}; font-family:'Segoe UI'; }}
@@ -1937,15 +2148,16 @@ class DropdownPopup(QObject):
             name = ("✓ " if prof["id"] == active_id else "   ") + prof["name"]
             act  = menu.addAction(name)
             act.setData(prof["id"])
+        _activate_for_menu(self._popup)   # menu needs an ACTIVE owner to grab
         chosen = menu.exec(btn.mapToGlobal(QPoint(0, btn.height())))
         if chosen:
             self.profiles.set_active(chosen.data())
             self._refresh()
 
     def _show_send_to_menu(self, item: dict, gpos: QPoint):
-        if not self.profiles:
+        if not self.profiles or not self._popup:
             return
-        menu = QMenu()
+        menu = QMenu(self._popup)   # dies with the popup — never orphaned
         menu.setStyleSheet(f"""
             QMenu {{ background:{self._colours['bg_item']}; color:{self._colours['text']};
                      border:1px solid {self._colours['border']}; font-family:'Segoe UI'; }}
@@ -1953,15 +2165,33 @@ class DropdownPopup(QObject):
         """)
         menu.addAction("Send to profile…").setEnabled(False)
         menu.addSeparator()
+        # Every profile EXCEPT the one currently shown (sending an item to
+        # the profile you're looking at is a no-op). General included.
+        active_id = self.profiles.get_active_profile()["id"]
         for prof in self.profiles.get_all_profiles():
-            if prof.get("built_in"):
+            if prof["id"] == active_id:
                 continue
             act = menu.addAction(prof["name"])
             act.setData(prof["id"])
+        _activate_for_menu(self._popup)   # menu needs an ACTIVE owner to grab
         chosen = menu.exec(gpos)
         if chosen and chosen.data():
-            self.profiles.add_item_to_profile(item["id"], chosen.data())
-            self._show_toast(f'Sent to "{chosen.text()}"')
+            self._send_item_to_profile(item, chosen.data(), chosen.text())
+
+    def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
+        """Send a history item to a profile. 'General' is special: it is
+        simply the un-hidden history list, so sending there means clearing
+        the item's hidden flag (set when side-panel files become their own
+        entries)."""
+        if profile_id == "general":
+            entry = self.history._find_by_id(item["id"])
+            if entry is not None and entry.get("hidden"):
+                entry["hidden"] = False
+                self.history._save_history()
+        else:
+            self.profiles.add_item_to_profile(item["id"], profile_id)
+        self._show_toast(f'Sent to "{profile_name}"')
+        self._refresh()
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -2033,33 +2263,219 @@ class DropdownPopup(QObject):
             items = self.history.get_all() if self.history else []
         self._items_all = items
 
-        # Rows — respect an active search filter if one is typed
-        query = self._search_edit.text() if self._search_edit else ""
-        if query.strip():
-            self._on_search(query)     # repopulates + sets count label
-        else:
-            self._populate_list(items)
-            if not items:
-                self._build_empty_label(self._list_container, self._colours)
-            if self._count_lbl:
-                self._count_lbl.setText(f"{len(items)} items")
+        # Mutate with painting SUSPENDED, then repaint the WHOLE window
+        # once. Resizing a visible translucent (layered) window while
+        # partial dirty regions are pending makes Windows reject the
+        # update entirely (UpdateLayeredWindowIndirect: "parameter is
+        # incorrect", dirty rect from the OLD size) — the popup then
+        # freezes showing the previous profile. A single full-rect
+        # repaint after the resize can never mismatch.
+        popup = self._popup
+        popup.setUpdatesEnabled(False)
+        try:
+            # Rows — respect an active search filter if one is typed
+            query = self._search_edit.text() if self._search_edit else ""
+            if query.strip():
+                self._on_search(query)     # repopulates + sets count label
+            else:
+                self._populate_list(items)
+                if not items:
+                    self._build_empty_label(self._list_container, self._colours)
+                if self._count_lbl:
+                    self._count_lbl.setText(f"{len(items)} items")
 
-        # Header profile name (active profile may have changed)
-        if getattr(self, "_prof_btn", None) is not None and self.profiles:
-            try:
-                name = self.profiles.get_active_profile()["name"]
-                self._prof_btn.setText(f"{name}  ▾")
-            except RuntimeError:
-                pass
+            # Header profile name (active profile may have changed)
+            if getattr(self, "_prof_btn", None) is not None and self.profiles:
+                try:
+                    name = self.profiles.get_active_profile()["name"]
+                    self._prof_btn.setText(f"{name}  ▾")
+                except RuntimeError:
+                    pass
 
-        # Window height follows the item count
-        if getattr(self, "_scroll", None) is not None:
-            max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
-            self._scroll.setFixedHeight(max_h)
-            self._popup.adjustSize()
+            # Window height follows the item count — computed EXACTLY from
+            # the chrome height measured at build time and hard-set.
+            # (sizeHint-based resizing proved unreliable mid-mutation: a
+            # stale hint left the window tall and the fixed-height children
+            # spread apart with exposed gaps.)
+            if getattr(self, "_scroll", None) is not None:
+                max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
+                self._scroll.setFixedHeight(max_h)
+                chrome = getattr(self, "_chrome_h", None)
+                if chrome:
+                    popup.setFixedHeight(chrome + max_h)
+                else:   # fallback — should not happen after a normal build
+                    lay = popup.layout()
+                    if lay is not None:
+                        lay.activate()
+                    popup.adjustSize()
+        finally:
+            popup.setUpdatesEnabled(True)
+            popup.update()
+            # One more full repaint AFTER the deferred row deletions run
+            def _late_update():
+                try:
+                    if popup.isVisible():
+                        popup.update()
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(0, _late_update)
 
         # Close-behaviour setting may have changed
         self._start_hover_close_if_enabled()
+
+    # ── Multi-selection + drag-out ───────────────────────────────────────────
+
+    def _toggle_select(self, item: dict, row):
+        """Ctrl+click: toggle an item in/out of the multi-selection."""
+        iid = item["id"]
+        if iid in self._selected_ids:
+            self._selected_ids.discard(iid)
+            row.set_selected(False)
+        else:
+            self._selected_ids.add(iid)
+            row.set_selected(True)
+        self._update_count_label()
+
+    def _clear_selection(self):
+        """Deselect everything (header ✕ badge, or first Escape press)."""
+        if not self._selected_ids:
+            return
+        self._selected_ids.clear()
+        if self._list_container is not None:
+            try:
+                for r in self._list_container.findChildren(ItemRowWidget):
+                    if r._selected:
+                        r.set_selected(False)
+            except RuntimeError:
+                pass
+        self._update_count_label()
+
+    def _update_count_label(self):
+        lbl = self._count_lbl
+        if lbl is None:
+            return
+        try:
+            n = len(self._selected_ids)
+            if n:
+                lbl.setText(f"✕  {n} selected")
+                lbl.setStyleSheet("color:#ffffff;background:transparent;"
+                                  "font-weight:bold;")
+                lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+                lbl.setToolTip("Clear selection")
+            else:
+                lbl.setText(f"{len(getattr(self, '_items_all', []) or [])} items")
+                lbl.setStyleSheet("color:#c7d2fe;background:transparent;")
+                lbl.setCursor(Qt.CursorShape.ArrowCursor)
+                lbl.setToolTip("")
+        except RuntimeError:
+            pass   # label already destroyed with an old window
+
+    def _on_escape(self):
+        """Escape steps back: side-panel selection → main selection →
+        close the popup. Only acts while the popup is open."""
+        if not self._popup or not self._popup.isVisible():
+            return
+        panel = self._side_panel
+        if panel is not None:
+            try:
+                if panel.isVisible() and panel._list.selectedItems():
+                    panel._list.clearSelection()
+                    return
+            except RuntimeError:
+                pass
+        if self._selected_ids:
+            self._clear_selection()
+        else:
+            self.hide()
+
+    def _combined_selection_item(self) -> dict | None:
+        """Merge the multi-selection into ONE pasteable item.
+
+        All text kinds  → texts joined with newlines (single Ctrl+V).
+        All files/images→ one multi-file entry (images by their PNG path).
+        Mixed           → None; the clipboard can't hold both sensibly.
+        Selection order follows the visible list order.
+        """
+        sel = [it for it in self._items_all if it["id"] in self._selected_ids]
+        if not sel:
+            return None
+        texts = [it for it in sel if it.get("type") in _TEXT_KINDS]
+        paths = []
+        for it in sel:
+            if it.get("type") == "file" and isinstance(it.get("content"), list):
+                paths.extend(it["content"])
+            elif it.get("type") == "image":
+                paths.append(str(it["content"]))
+        if texts and not paths:
+            return {"id": "multi-sel", "type": "text",
+                    "content": "\n".join(str(t["content"]) for t in texts),
+                    "source": f"{len(texts)} selected items"}
+        if paths and not texts:
+            return {"id": "multi-sel", "type": "file",
+                    "content": paths,
+                    "source": f"{len(sel)} selected items"}
+        return None   # mixed text + files
+
+    def _drag_payload(self, item: dict) -> list:
+        """Items a drag from this row carries: the whole selection when
+        the row is part of it, otherwise just the row itself."""
+        if item["id"] in self._selected_ids:
+            return [it for it in self._items_all
+                    if it["id"] in self._selected_ids]
+        return [item]
+
+    def _start_drag(self, item: dict, row):
+        """Drag rows OUT of ClipDrop — drop into any app to paste there.
+        Runs synchronously from the row's mouse-move (Qt's DnD pattern);
+        the popup stays open and never takes focus, so the drop target
+        receives the data exactly like an Explorer drag."""
+        items = self._drag_payload(item)
+        drag  = QDrag(row)
+        drag.setMimeData(_mime_for_items(items))
+
+        # Drag pixmap: the grabbed row, with a count bubble when multiple
+        pm = row.grab()
+        if pm.width() > 260:
+            pm = pm.scaledToWidth(260, Qt.TransformationMode.SmoothTransformation)
+        if len(items) > 1:
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QBrush(QColor(self._colours["accent"])))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(pm.width()-30, 4, 24, 24)
+            p.setPen(QPen(QColor("white")))
+            f = p.font(); f.setBold(True); p.setFont(f)
+            p.drawText(QRect(pm.width()-30, 4, 24, 24),
+                       Qt.AlignmentFlag.AlignCenter, str(len(items)))
+            p.end()
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(pm.width() // 3, pm.height() // 2))
+
+        # Text-only payloads allow MOVE and DEFAULT to it — edit controls
+        # propose Move for dropped text and some reject anything else.
+        # (Moving costs nothing: the history item is never deleted.)
+        # Anything carrying file URLs stays Copy-only: a Move-accepting
+        # target would relocate the user's actual files on disk.
+        mime = drag.mimeData()
+        if mime.hasUrls():
+            actions, default = (Qt.DropAction.CopyAction,
+                                Qt.DropAction.CopyAction)
+        else:
+            actions = Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
+            default = Qt.DropAction.MoveAction
+
+        _DRAG_STATE["active"] = True
+        try:
+            drag.exec(actions, default)
+        finally:
+            _DRAG_STATE["active"] = False
+            # The release event is consumed by the drag — reset by hand
+            try:
+                row._press_pos    = None
+                row._is_dragging  = False
+                row._drag_started = False
+            except RuntimeError:
+                pass   # row deleted by a refresh during the drag
 
     # ── Hide ──────────────────────────────────────────────────────────────────
 
@@ -2088,6 +2504,7 @@ class DropdownPopup(QObject):
         self._close_windows()
         if self._hover_timer:
             self._hover_timer.stop()
+        self._selected_ids.clear()   # selection is per popup session
         # Popup session over — forget the paste target so the next show()
         # captures the then-foreground window, not a stale one. (_refresh
         # rebuilds must NOT do this — they keep the session alive, which
@@ -2117,6 +2534,8 @@ class DropdownPopup(QObject):
         if not win or not win.isVisible():
             self._hover_timer.stop()
             return
+        if _DRAG_STATE["active"]:
+            return   # never close the popup out from under an active drag
         # A context menu is open — its cursor position is "outside" the
         # popup but the user is mid-interaction. Never close under a menu.
         if QApplication.activePopupWidget() is not None:
@@ -2165,6 +2584,15 @@ class DropdownPopup(QObject):
         # Ignore clicks while a paste is already in flight
         if self._paste_worker and self._paste_worker.isRunning():
             return
+        # Clicking a row that's part of a multi-selection pastes the WHOLE
+        # selection as one combined payload.
+        if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
+            combined = self._combined_selection_item()
+            if combined is None:
+                self._show_toast("⚠ Mixed selection — can't paste text and "
+                                 "files together")
+                return
+            item = combined
         # Item type vs paste target: pasting raw text/code into File
         # Explorer or the desktop does nothing — tell the user instead of
         # failing silently.
