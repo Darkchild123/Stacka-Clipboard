@@ -438,6 +438,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-21 | Icon system rebuilt as SVG (crisp at every size), dedicated Python icon and smart type detection, plus an optional per-extension "Labeled documents" icon pack selectable in Settings |
 | 2026-07-21 | Adjustable sizing — three sliders (main window, row size, side list) scaling the UI 60–120% in fixed 10% steps, with dependent values derived automatically |
 | 2026-07-21 | Open items from the list — right-click Open / Open containing folder for files, folders and links, with existence checking moved off the UI thread so dead network paths can't freeze the app |
+| 2026-07-22 | Customisation pass — cursor positioning fixed on scaled displays, hover bulge + selectable hover colours + font-size control, side-list-rows slider, shortcut unassign, and create-new-profile in every send-to menu and the header |
 
 ---
 
@@ -949,4 +950,54 @@ path can legitimately keep a worker busy for the whole timeout. Quitting
 ClipDrop shortly after opening a stale network file would therefore have
 crashed on exit, so in-flight checks are given a moment to finish during
 shutdown.
+
+---
+
+### 🎛️ Customisation & UX Refinements (July 2026)
+
+**Status:** ✅ Complete (window drag-resize still to come)
+
+#### Cursor positioning on scaled displays
+
+The popup opens **at the cursor**, but on a display with Windows scaling
+(125%, 150%) it was landing offset. The cause is a coordinate-space
+mismatch: the mouse hook reports **physical** pixels while Qt positions
+windows in **logical** pixels, and on a scaled screen those differ by the
+scale factor. The fix anchors the popup on `QCursor.pos()` — Qt's own
+reading of the cursor — so the anchor and the placement call are in the
+same coordinate system and always agree, at any scaling.
+
+#### Appearance options
+
+- **Row hover** was redrawn with a mild convex "bulge": a vertical
+  gradient (lighter top, darker base) that reads as a slightly raised
+  surface. Its contrast was raised too — the light theme's near-invisible
+  grey hover became a clear indigo tint.
+- **Hover colour** is now selectable — Indigo (default), Gold, Emerald,
+  Rose, Sky, Violet, Slate.
+- **Main-window font size** is adjustable (80–140%).
+- The **transparency** floor was raised to 50% (below that the popup was
+  too faint to read).
+
+#### Sizing
+
+The side-list *size* slider was replaced with a **Side list rows** slider
+(1–20) — how many rows show before it scrolls — which is the dimension
+that actually matters for a hover flyout. Row size and main-window sliders
+remain (the main-window one until window drag-resize replaces it).
+
+#### Shortcuts — unassign
+
+Each shortcut row now has three actions: **listen**, **reset to default**,
+and **clear**. Clearing leaves the action with *no* shortcut: an empty
+combo is saved as "unassigned" and stays that way (it no longer silently
+reverts to the default on the next launch).
+
+#### New profile, in every menu
+
+A profile can be created on the spot — a **➕** in the popup header (new
+empty profile, switches to it) and a **➕ New profile…** entry in every
+"Send to profile" menu: the main list, the file side panel, and the nested
+folder panels. From a Send-to menu it prompts for a name, creates the
+profile, and drops the clip straight into it.
 

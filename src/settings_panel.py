@@ -276,6 +276,15 @@ class ShortcutsWindow(QWidget):
             reset.clicked.connect(
                 lambda _=False, e=edit, d=default: e.setKeySequence(QKeySequence(d)))
             rl.addWidget(reset)
+
+            clear = QPushButton("✕", row)
+            clear.setFixedWidth(30)
+            clear.setToolTip("Unassign — leave this action with no shortcut")
+            clear.setStyleSheet(_btn_style(C["bg_section"], C["danger"], C["text_dim"]))
+            clear.clicked.connect(
+                lambda _=False, e=edit, k=key: (e.clearFocus(), e.clear(),
+                                                self._check_conflicts(k)))
+            rl.addWidget(clear)
             body.addWidget(row)
 
         # Footer: feedback + Save/Close
@@ -405,27 +414,28 @@ class ShortcutsWindow(QWidget):
         QTimer.singleShot(2500, lambda: self._feedback_lbl.setText(""))
 
     def _save(self):
-        # Pass 1: collect + validate every combo (no empties, no duplicates)
+        # Pass 1: collect + validate. An EMPTY combo means "unassigned" —
+        # allowed (the action simply has no shortcut). Duplicates among the
+        # non-empty ones are still rejected.
         combos = {}
         seen   = {}
         for key, label, default in SHORTCUT_DEFS:
             seq   = self._edits[key].keySequence().toString()   # "Ctrl+Shift+V"
             combo = seq.replace(" ", "").lower()                # keyboard-lib format
-            if not combo:
-                self._feedback(f"'{label}' has no key set", ok=False)
-                return
-            if combo in seen:
-                self._feedback(f"{seq} is assigned twice", ok=False)
-                return
-            seen[combo] = key
+            if combo:
+                if combo in seen:
+                    self._feedback(f"{seq} is assigned twice", ok=False)
+                    return
+                seen[combo] = key
             combos[key] = (combo, seq)
 
-        # Pass 2: re-bind live; on any failure the old binding for that
-        # action is restored by set_hotkey and nothing further is saved.
+        # Pass 2: re-bind live. Empty combo → unbind the action. On a bind
+        # failure the old binding is restored by set_hotkey; nothing further
+        # is saved.
         ctx = QApplication.instance().property("clipdrop_context")
         for key, (combo, seq) in combos.items():
             if ctx is not None:
-                if not ctx.set_hotkey(key, combo):
+                if not ctx.set_hotkey(key, combo):     # combo="" → unbind
                     self._feedback(f"Could not bind {seq}", ok=False)
                     return
             self.history.save_setting(key, combo)
@@ -626,9 +636,9 @@ class SettingsPanel(QWidget):
 
         slider_row = QWidget(w); slider_row.setStyleSheet(f"background:{C['bg']};")
         sr = QHBoxLayout(slider_row); sr.setContentsMargins(0,0,0,0); sr.setSpacing(8)
-        current_opacity = int(self.history.settings.get("transparency", 1.0) * 100)
+        current_opacity = max(50, int(self.history.settings.get("transparency", 1.0) * 100))
         self._slider = QSlider(Qt.Orientation.Horizontal, w)
-        self._slider.setRange(40, 100)
+        self._slider.setRange(50, 100)
         self._slider.setValue(current_opacity)
         self._slider.setFixedWidth(200)
         self._slider.setStyleSheet(f"""
@@ -644,7 +654,54 @@ class SettingsPanel(QWidget):
         sr.addWidget(self._opacity_lbl)
         sr.addStretch()
         lay.addWidget(slider_row)
+
+        # Row hover colour — a strip of clickable swatches
+        hv_row = QWidget(w); hv_row.setStyleSheet(f"background:{C['bg']};")
+        hr = QHBoxLayout(hv_row); hr.setContentsMargins(0,2,0,0); hr.setSpacing(6)
+        hlbl = QLabel("Row hover:", w); hlbl.setFixedWidth(80)
+        hlbl.setStyleSheet(f"color:{C['text']};background:transparent;")
+        hr.addWidget(hlbl)
+        self._hover_colour = self.history.settings.get("hover_colour", "default")
+        self._hover_swatches = {}
+        for key, name, swatch in self.HOVER_CHOICES:
+            b = QPushButton("", hv_row)
+            b.setFixedSize(22, 22)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(name)
+            b.clicked.connect(lambda _=False, k=key: self._set_hover_colour(k))
+            self._hover_swatches[key] = (b, swatch)
+            hr.addWidget(b)
+        hr.addStretch()
+        self._refresh_hover_swatches()
+        lay.addWidget(hv_row)
         return w
+
+    HOVER_CHOICES = [
+        ("default", "Indigo",  "#6366f1"),
+        ("gold",    "Gold",    "#d4a017"),
+        ("emerald", "Emerald", "#0e9f6e"),
+        ("rose",    "Rose",    "#e11d6b"),
+        ("sky",     "Sky",     "#0ea5e9"),
+        ("violet",  "Violet",  "#7c3aed"),
+        ("slate",   "Slate",   "#64748b"),
+    ]
+
+    def _refresh_hover_swatches(self):
+        for key, (btn, swatch) in self._hover_swatches.items():
+            sel = key == self._hover_colour
+            ring = "#ffffff" if sel else self.C["border"]
+            width = 3 if sel else 1
+            btn.setStyleSheet(
+                f"QPushButton{{background:{swatch};border:{width}px solid {ring};"
+                f"border-radius:5px;}}")
+
+    def _set_hover_colour(self, key: str):
+        if key == self._hover_colour:
+            return
+        self._hover_colour = key
+        self.history.save_setting("hover_colour", key)
+        self._refresh_hover_swatches()
+        self._apply_to_app()
 
     # (mode key, button label, one-line caption)
     TRIGGER_MODES = [
@@ -672,10 +729,11 @@ class SettingsPanel(QWidget):
     # 100% = the app's default size. Deliberately caption-free: at this
     # window width a per-row caption wraps to 2-3 lines and triples the
     # section's height.
+    # Percent sliders (60–120% in 10% steps). Main window stays for now —
+    # it is replaced by drag-to-resize in a later step.
     SIZE_SLIDERS = [
         ("scale_popup", "Main window"),
         ("scale_row",   "Row size"),
-        ("scale_panel", "Side list"),
     ]
 
     def _section_sizing(self) -> QWidget:
@@ -728,13 +786,70 @@ class SettingsPanel(QWidget):
             self._size_lbls[key] = val
             rl.addWidget(sld); rl.addWidget(val); rl.addStretch()
             lay.addWidget(row)
+
+        # ── Side list rows: a COUNT (1–20), not a percent ──
+        row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+        row.setFixedHeight(24)
+        rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+        name = QLabel("Side list rows", row); name.setFixedWidth(88)
+        name.setStyleSheet(f"color:{C['text']};background:transparent;")
+        rl.addWidget(name)
+        rows = max(1, min(20, int(self.history.settings.get("side_list_rows", 10))))
+        rsld = QSlider(Qt.Orientation.Horizontal, row)
+        rsld.setRange(1, 20); rsld.setValue(rows)
+        rsld.setSingleStep(1); rsld.setPageStep(1); rsld.setFixedWidth(210)
+        rsld.setStyleSheet(f"""
+            QSlider::groove:horizontal {{background:{C['bg_section']};height:5px;border-radius:3px;}}
+            QSlider::handle:horizontal {{background:{C['accent']};width:13px;height:13px;
+                border-radius:7px;margin:-4px 0;}}
+        """)
+        rval = QLabel(str(rows), row); rval.setFixedWidth(40)
+        rval.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+        rsld.valueChanged.connect(self._on_side_rows_change)
+        self._side_rows_lbl = rval
+        rl.addWidget(rsld); rl.addWidget(rval); rl.addStretch()
+        lay.addWidget(row)
+
+        # ── Main window font size (80–140% in 10% steps) ──
+        frow = QWidget(w); frow.setStyleSheet(f"background:{C['bg']};")
+        frow.setFixedHeight(24)
+        fl = QHBoxLayout(frow); fl.setContentsMargins(0,0,0,0); fl.setSpacing(8)
+        fname = QLabel("Font size", frow); fname.setFixedWidth(88)
+        fname.setStyleSheet(f"color:{C['text']};background:transparent;")
+        fl.addWidget(fname)
+        fpct = max(80, min(140, int(round(int(self.history.settings.get("font_scale",100))/10.0)*10)))
+        fsld = QSlider(Qt.Orientation.Horizontal, frow)
+        fsld.setRange(8, 14); fsld.setValue(fpct // 10)
+        fsld.setSingleStep(1); fsld.setPageStep(1); fsld.setFixedWidth(210)
+        fsld.setStyleSheet(f"""
+            QSlider::groove:horizontal {{background:{C['bg_section']};height:5px;border-radius:3px;}}
+            QSlider::handle:horizontal {{background:{C['accent']};width:13px;height:13px;
+                border-radius:7px;margin:-4px 0;}}
+        """)
+        fval = QLabel(f"{fpct}%", frow); fval.setFixedWidth(40)
+        fval.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+        fsld.valueChanged.connect(self._on_font_change)
+        self._font_lbl = fval
+        fl.addWidget(fsld); fl.addWidget(fval); fl.addStretch()
+        lay.addWidget(frow)
         return w
+
+    def _on_font_change(self, steps: int):
+        pct = steps * 10
+        self._font_lbl.setText(f"{pct}%")
+        self.history.save_setting("font_scale", pct)
+        self._size_timer.start(180)
 
     def _on_size_change(self, key: str, steps: int, label: QLabel):
         pct = steps * 10
         label.setText(f"{pct}%")
         self.history.save_setting(key, pct)
         self._size_timer.start(180)   # debounce → one popup rebuild
+
+    def _on_side_rows_change(self, n: int):
+        self._side_rows_lbl.setText(str(n))
+        self.history.save_setting("side_list_rows", int(n))
+        self._size_timer.start(180)
 
     ICON_PACKS = [
         ("default", "🎨  Default ClipDrop",

@@ -754,12 +754,20 @@ class ContextMenu:
     def _setup_hotkey(self):
         """Bind every configurable shortcut. Combos come from settings
         (Settings → Shortcuts) with SHORTCUT_DEFS defaults."""
-        self._hotkeys = {}   # settings_key → bound combo
+        self._hotkeys = {}   # settings_key → bound combo ("" = unassigned)
         for key, _label, default in SHORTCUT_DEFS:
             try:
-                combo = self.history.settings.get(key, default) or default
+                # NOTE: get(key, default) — NOT `or default`. A stored ""
+                # means the user deliberately UNASSIGNED it; falling back to
+                # default there would re-bind a shortcut they removed.
+                combo = self.history.settings.get(key, default)
             except Exception:
                 combo = default
+            combo = (combo or "").strip() if combo is not None else default
+            if not combo:
+                self._hotkeys[key] = ""
+                print(f"Hotkey unassigned: ({key})")
+                continue
             try:
                 keyboard.add_hotkey(combo, self._make_hotkey_cb(key),
                                     suppress=True)
@@ -774,16 +782,22 @@ class ContextMenu:
         return lambda: self._signals.run_action.emit(key)
 
     def set_hotkey(self, key: str, combo: str) -> bool:
-        """Re-bind one shortcut live (Settings → Shortcuts). Returns True
-        on success; on failure the old binding is restored."""
-        old = self._hotkeys.get(key) if hasattr(self, "_hotkeys") else None
+        """Re-bind one shortcut live (Settings → Shortcuts). An empty combo
+        UNASSIGNS the action (no shortcut). Returns True on success; on a
+        bind failure the old binding is restored."""
         if not hasattr(self, "_hotkeys"):
             self._hotkeys = {}
+        combo = (combo or "").strip()
+        old = self._hotkeys.get(key)
         if old:
             try:
                 keyboard.remove_hotkey(old)
             except Exception:
                 pass
+        if not combo:                      # unassign — leave it unbound
+            self._hotkeys[key] = ""
+            print(f"Hotkey unassigned: ({key})")
+            return True
         try:
             keyboard.add_hotkey(combo, self._make_hotkey_cb(key), suppress=True)
             self._hotkeys[key] = combo

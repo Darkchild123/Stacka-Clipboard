@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QScrollArea, QFrame,
     QAbstractItemView, QMenu, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStyledItemDelegate,
-    QMessageBox,
+    QMessageBox, QInputDialog,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
@@ -54,7 +54,7 @@ from PyQt6.QtSvg import QSvgRenderer
 DARK = {
     "bg":           "#1e1e2e",
     "bg_item":      "#2a2a3e",
-    "bg_hover":     "#4c4c8a",
+    "bg_hover":     "#6366f1",   # brighter indigo — clearer row-hover contrast
     "bg_pinned":    "#2d3748",
     "accent":       "#4f46e5",
     "accent_light": "#6366f1",
@@ -69,7 +69,7 @@ DARK = {
 LIGHT = {
     "bg":           "#f8fafc",
     "bg_item":      "#f1f5f9",
-    "bg_hover":     "#e2e8f0",
+    "bg_hover":     "#c7d2fe",   # indigo tint — the old grey was near-invisible
     "bg_pinned":    "#dbeafe",
     "accent":       "#4f46e5",
     "accent_light": "#6366f1",
@@ -190,6 +190,25 @@ def _activate_for_menu(widget):
         win.activateWindow()
     except Exception:
         pass
+
+
+def _to_logical(x: int, y: int):
+    """Convert PHYSICAL screen pixels (from the mouse hook / pyautogui, both
+    DPI-aware) to Qt's LOGICAL pixels used by move()/geometry().
+
+    On a scaled display (125%, 150%) Qt reports a device-pixel-ratio > 1 and
+    its coordinate space is physical ÷ ratio, so feeding raw physical coords
+    to move() lands the window off by the scale factor — the popup drifts
+    from the cursor. Dividing by the ratio corrects it. A no-op at 100%
+    (ratio 1.0), so positioning-at-a-point is unchanged there.
+    """
+    try:
+        r = QApplication.primaryScreen().devicePixelRatio()
+        if r and r != 1.0:
+            return int(round(x / r)), int(round(y / r))
+    except Exception:
+        pass
+    return x, y
 
 
 def _set_no_activate(hwnd: int):
@@ -569,24 +588,64 @@ def clamp_scale(pct) -> int:
     return int(round(pct / SCALE_STEP) * SCALE_STEP)
 
 
-def apply_scales(popup_pct=100, row_pct=100, panel_pct=100):
+def apply_scales(popup_pct=100, row_pct=100):
     """Apply the Settings sizing sliders. Values that must move together
     (icon with row height, text wrap with window width, list cap with row
-    height) are derived here rather than exposed as separate sliders."""
+    height) are derived here rather than exposed as separate sliders. The
+    side list keeps its base size — only its visible row COUNT is
+    configurable (see set_side_list_rows)."""
     global POPUP_WIDTH, ITEM_HEIGHT, THUMB_SIZE, PREVIEW_W, LIST_MAX_H
     p = clamp_scale(popup_pct) / 100.0
     r = clamp_scale(row_pct)   / 100.0
-    s = clamp_scale(panel_pct) / 100.0
 
     POPUP_WIDTH = int(_BASE_POPUP_WIDTH * p)
     PREVIEW_W   = int(_BASE_PREVIEW_W   * p)
     ITEM_HEIGHT = int(_BASE_ITEM_HEIGHT * r)
     THUMB_SIZE  = int(_BASE_THUMB_SIZE  * r)
     LIST_MAX_H  = int(_BASE_LIST_MAX_H  * r)
-    # Side list (class attributes — read when a panel is constructed)
-    SidePanelWidget.PANEL_W = int(_BASE_PANEL_W * s)
-    SidePanelWidget.ROW_H   = max(16, int(_BASE_PANEL_ROW_H * s))
-    SidePanelWidget.SCALE   = s
+    # Side list stays at its base dimensions
+    SidePanelWidget.PANEL_W = _BASE_PANEL_W
+    SidePanelWidget.ROW_H   = _BASE_PANEL_ROW_H
+    SidePanelWidget.SCALE   = 1.0
+
+
+def set_side_list_rows(n):
+    """How many side-list rows are visible before it scrolls (1–20)."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        n = 10
+    SidePanelWidget.MAX_VISIBLE = max(1, min(20, n))
+
+
+# Row-hover colour choices (Settings → Appearance). None = the theme's
+# default (bg_hover). Keys are stored in settings; values are the hover base.
+HOVER_COLOURS = {
+    "default": None,        # theme default (indigo)
+    "gold":    "#d4a017",
+    "emerald": "#0e9f6e",
+    "rose":    "#e11d6b",
+    "sky":     "#0ea5e9",
+    "violet":  "#7c3aed",
+    "slate":   "#64748b",
+}
+_HOVER_COLOUR = None        # active override, or None for theme default
+_FONT_SCALE   = 1.0         # main-list font size multiplier (0.8–1.4)
+
+
+def set_hover_colour(key):
+    global _HOVER_COLOUR
+    _HOVER_COLOUR = HOVER_COLOURS.get(key)
+
+
+def set_font_scale(pct):
+    """Main-window font size, as a percent (80–140) of the base sizes."""
+    global _FONT_SCALE
+    try:
+        pct = int(pct)
+    except (TypeError, ValueError):
+        pct = 100
+    _FONT_SCALE = max(80, min(140, pct)) / 100.0
 
 
 # ── Item row widget ───────────────────────────────────────────────────────────
@@ -683,13 +742,13 @@ class ItemRowWidget(QWidget):
         self._preview_lbl = QLabel(preview, self)
         self._preview_lbl.setWordWrap(True)
         self._preview_lbl.setMaximumWidth(PREVIEW_W)   # follows window width
-        self._preview_lbl.setFont(QFont("Segoe UI", 10))
+        self._preview_lbl.setFont(QFont("Segoe UI", max(6, int(10 * _FONT_SCALE))))
         self._preview_lbl.setStyleSheet(f"color:{C['text_preview']};background:transparent;")
         text_col.addWidget(self._preview_lbl)
 
         src = item.get("source","Unknown")
         self._source_lbl = QLabel(f"From: {src}", self)
-        self._source_lbl.setFont(QFont("Segoe UI", 8))
+        self._source_lbl.setFont(QFont("Segoe UI", max(6, int(8 * _FONT_SCALE))))
         self._source_lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
         text_col.addWidget(self._source_lbl)
         text_col.addStretch()
@@ -782,14 +841,17 @@ class ItemRowWidget(QWidget):
 
     # ── Background ───────────────────────────────────────────────────────────
 
-    def _apply_bg(self, hex_col: str):
+    def _apply_bg(self, bg_css: str, extra: str = ""):
         # Selected rows carry an accent outline on top of their tint
         border = (f"border:1px solid {self.C['accent']};" if self._selected
                   else "border:none;")
-        self.setStyleSheet(f"background:{hex_col};{border}")
+        self.setStyleSheet(f"background:{bg_css};{border}{extra}")
         # Keep labels transparent so row bg shows through
         for lbl in [self._preview_lbl, self._source_lbl, self._thumb]:
             lbl.setStyleSheet(lbl.styleSheet().split(";")[0] + ";background:transparent;")
+
+    def _hover_target(self) -> str:
+        return _HOVER_COLOUR or self.C["bg_hover"]
 
     # ── Multi-selection (Ctrl+click) ─────────────────────────────────────────
 
@@ -798,7 +860,7 @@ class ItemRowWidget(QWidget):
         self._base_bg  = (_hex_lerp(self._orig_base, self.C["accent"], 0.28)
                           if selected else self._orig_base)
         # Repaint at the current hover state
-        self._apply_bg(_hex_lerp(self._base_bg, self.C["bg_hover"], self._anim_t))
+        self._on_anim_value(self._anim_t)
 
     # ── Hover animation ──────────────────────────────────────────────────────
 
@@ -816,11 +878,19 @@ class ItemRowWidget(QWidget):
 
     def _on_anim_value(self, v):
         t = self._anim_t = float(v)
-        # Three cheap stylesheet updates per frame — nothing heavier.
-        # (A QGraphicsDropShadowEffect glow was tried here: it forces the
-        # row to re-rasterize through a blur EVERY frame, which visibly
-        # janks the animation. Never attach effects to animated rows.)
-        bg = _hex_lerp(self._base_bg, self.C["bg_hover"], t)
+        # Cheap stylesheet updates only — no graphics effects (a blur effect
+        # re-rasterizes the row every frame and janks the animation).
+        hovcol = _hex_lerp(self._base_bg, self._hover_target(), t)
+        if t > 0.04:
+            # Convex "bulge": a vertical gradient, lighter at the top and
+            # darker at the base, reads as a mildly raised surface. Pure
+            # gradient — no border, so it never shifts the row layout.
+            top = _shade(hovcol, 0.16 * t)
+            bot = _shade(hovcol, -0.14 * t)
+            bg = (f"qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                  f"stop:0 {top},stop:0.5 {hovcol},stop:1 {bot})")
+        else:
+            bg = hovcol
         self._apply_bg(bg)
         self._strip.setFixedWidth(max(3, int(3 + 7 * t)))
         tc = _hex_lerp(self.C["text_preview"], self.C["text"], t)
@@ -1418,11 +1488,14 @@ class SidePanelWidget(QWidget):
             # IN any profile yet — sending it to General creates its own
             # visible entry there; to a named profile, a hidden one.
             profs = self._send_targets()
-            if profs:
+            if self.controller is not None and self.controller.profiles:
                 sub = menu.addMenu("Send to profile")
                 for prof in profs:
                     act = sub.addAction(prof["name"])
                     act.setData(("send", prof["id"], prof["name"]))
+                sub.addSeparator()
+                sub.addAction("➕  New profile…").setData(
+                    ("newprofile", None, None))
 
             pin_act = menu.addAction("Unpin" if self._file_is_pinned(fp) else "Pin")
             pin_act.setData(("pin", None, None))
@@ -1449,10 +1522,24 @@ class SidePanelWidget(QWidget):
             ctrl.open_path(fp, reveal=True)
         elif action == "send":
             self._send_file_to_profile(fp, prof_id, prof_name)
+        elif action == "newprofile":
+            self._new_profile_with_file(fp)
         elif action == "pin":
             self._toggle_file_pin(fp)
         elif action == "delete":
             self._delete_file(fp)
+
+    def _new_profile_with_file(self, fp: str):
+        """Side-list 'New profile…': prompt for a name, create it, and add
+        this file to it (as its own hidden history entry, like Send-to)."""
+        ctrl = self.controller
+        if ctrl is None or not ctrl.profiles:
+            return
+        name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
+        if not ok or not name.strip():
+            return
+        pid = ctrl.profiles.create_profile(name.strip())
+        self._send_file_to_profile(fp, pid, name.strip())
 
     # ── Row rendering (pin-aware) ────────────────────────────────────────────
 
@@ -1800,8 +1887,10 @@ class DropdownPopup(QObject):
         if self.history:
             set_icon_pack(self.history.settings.get("icon_pack", "default"))
             apply_scales(self.history.settings.get("scale_popup", 100),
-                         self.history.settings.get("scale_row",   100),
-                         self.history.settings.get("scale_panel", 100))
+                         self.history.settings.get("scale_row",   100))
+            set_side_list_rows(self.history.settings.get("side_list_rows", 10))
+            set_hover_colour(self.history.settings.get("hover_colour", "default"))
+            set_font_scale(self.history.settings.get("font_scale", 100))
         C = self._colours
 
         # Get items
@@ -1914,6 +2003,14 @@ class DropdownPopup(QObject):
         # it should on the first paint — no flash at 0,0 first.
         popup.adjustSize()
         self._chrome_h = popup.height() - max_h   # see note at _scroll above
+        # Chrome is known now, so the screen ceiling can be applied: shrink
+        # the LIST (never the window) so tall content scrolls instead of
+        # being clipped, and the window can't exceed the screen.
+        fitted = self._fit_list_h(max_h, x, y)
+        if fitted != max_h:
+            max_h = fitted
+            scroll.setFixedHeight(max_h)
+            popup.setFixedHeight(self._chrome_h + max_h)
         self._position_popup(x, y)
         popup.show()
         # WS_EX_NOACTIVATE — winId is valid now that show() has been called.
@@ -1955,6 +2052,15 @@ class DropdownPopup(QObject):
             prof_btn.mousePressEvent = lambda e, b=prof_btn: self._show_profile_menu(b)
             lay.addWidget(prof_btn)
             self._prof_btn = prof_btn
+
+            # "+" — create a new (empty) profile straight from the header
+            new_btn = QLabel("➕", hdr)
+            new_btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            new_btn.setStyleSheet("color:#c7d2fe;background:transparent;")
+            new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            new_btn.setToolTip("Create a new profile")
+            new_btn.mousePressEvent = lambda e: self._new_profile()
+            lay.addWidget(new_btn)
 
         # Item count — doubles as the "clear selection" button when a
         # Ctrl+click multi-selection is active ("✕ N selected")
@@ -2183,8 +2289,15 @@ class DropdownPopup(QObject):
                 px = pop.left() - pw + 30       # flyout to the left
             px = max(g.left(), min(px, g.right() - pw))
 
-            # Align with the hovered row, clamped so the panel stays on-screen
-            py = pop.y() + row.y()
+            # Open at the parent ROW's level. row.y() is the row's position
+            # INSIDE the scrolled list — it ignores the header/search chrome
+            # above it and the scroll offset, so it opened too high and
+            # drifted once scrolled. mapToGlobal gives the row's true screen
+            # Y; subtract the panel's own top inset so the panel's CARD (not
+            # its transparent margin) lines up with the row.
+            row_y = row.mapToGlobal(QPoint(0, 0)).y()
+            top_inset = panel.layout().contentsMargins().top() if panel.layout() else 0
+            py = row_y - top_inset
             py = max(g.top(), min(py, g.bottom() - ph))
 
             panel.move(px, py)
@@ -2192,23 +2305,79 @@ class DropdownPopup(QObject):
 
     # ── Position ──────────────────────────────────────────────────────────────
 
+    def _work_area(self, x: int, y: int) -> QRect:
+        """Usable area of the monitor under (x, y) — taskbar excluded.
+
+        screenAt() rather than primaryScreen() because a secondary monitor
+        can sit at negative coordinates or to the right of the primary;
+        availableGeometry() rather than geometry() so its edges ARE the
+        real screen borders the window must respect.
+        """
+        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
+        return screen.availableGeometry()
+
+    def _fit_list_h(self, desired: int, x: int, y: int) -> int:
+        """Cap the LIST height so the whole window fits the screen.
+
+        Capping the list (rather than shrinking the window afterwards)
+        means the overflow becomes SCROLLING instead of clipped content.
+        Three ceilings, smallest wins: how much content there is, the
+        user's size setting, and what physically fits on screen.
+        """
+        chrome = getattr(self, "_chrome_h", 0) or 0
+        return max(80, min(desired, self._work_area(x, y).height() - chrome))
+
     def _position_popup(self, x: int, y: int):
         popup = self._popup
         popup.adjustSize()
         w = popup.width()
         h = popup.height()
-        # Use the monitor the cursor is actually on — primaryScreen() is
-        # wrong on multi-monitor setups where a secondary screen sits at
-        # negative coordinates or to the right of the primary.
-        # availableGeometry() excludes the taskbar so the popup never
-        # opens underneath it.
-        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
-        g = screen.availableGeometry()
-        px = x if x + w <= g.right() else g.right() - w - 4
-        px = max(g.left(), px)
-        py = y if y + h <= g.bottom() else y - h
-        py = max(g.top(), py)
+        # Anchor on Qt's OWN cursor position. The (x, y) forwarded from the
+        # mouse hook / pyautogui are PHYSICAL pixels; Qt's move()/geometry
+        # are LOGICAL pixels. On a scaled display (e.g. 125%) those differ,
+        # so physical coords land the window off by the scale factor — the
+        # popup drifts from the cursor. QCursor.pos() is in the SAME logical
+        # space as move(), so the two always agree, at any scaling. (A test
+        # may pin the anchor via _anchor_override.)
+        if getattr(self, "_anchor_override", None) is not None:
+            x, y = self._anchor_override
+        else:
+            cur = QCursor.pos()
+            x, y = cur.x(), cur.y()
+        g = self._work_area(x, y)
+        # The window carries transparent shadow margins, so the VISIBLE card
+        # starts inset from the window corner. Offset by that inset so the
+        # CARD's corner lands on the cursor (like a native context menu),
+        # not the invisible window corner ~18px away.
+        m = popup.layout().contentsMargins() if popup.layout() else None
+        ox = m.left() if m else 0
+        oy = m.top()  if m else 0
+        # SLIDE the window back inside the work area — never flip it above
+        # the cursor, which throws it far from where the user clicked.
+        # Triggered near the bottom → the window's bottom rests on the
+        # taskbar edge; near the top → its top rests on the top edge.
+        # (QRect.right() is inclusive, hence the +1.)
+        px = max(g.left(), min(x - ox, g.right()  - w + 1))
+        py = max(g.top(),  min(y - oy, g.bottom() - h + 1))
         popup.move(px, py)
+
+    def _reclamp_position(self):
+        """Keep an OPEN popup inside the work area after its size changed.
+
+        _refresh() resizes with the top-left pinned, so a window that grows
+        (switching to a fuller profile, clearing a search) would otherwise
+        extend straight through the taskbar.
+        """
+        popup = self._popup
+        if not popup:
+            return
+        geo = popup.geometry()
+        c   = geo.center()
+        g   = self._work_area(c.x(), c.y())
+        px = max(g.left(), min(geo.x(), g.right()  - geo.width()  + 1))
+        py = max(g.top(),  min(geo.y(), g.bottom() - geo.height() + 1))
+        if (px, py) != (geo.x(), geo.y()):
+            popup.move(px, py)
 
     # ── Search ────────────────────────────────────────────────────────────────
 
@@ -2287,6 +2456,7 @@ class DropdownPopup(QObject):
                 if prof["id"] == active_id:
                     continue
                 menu.addAction(prof["name"]).setData(("send", prof["id"]))
+            menu.addAction("➕  New profile…").setData(("newprofile", None))
 
         if menu.isEmpty():
             return
@@ -2307,6 +2477,36 @@ class DropdownPopup(QObject):
                 print(f"[ClipDrop] Could not open URL: {e}")
         elif action == "send":
             self._send_item_to_profile(item, value, chosen.text())
+        elif action == "newprofile":
+            self._new_profile_with_item(item)
+
+    def _new_profile_with_item(self, item: dict):
+        """Prompt for a name, create the profile, and add this clip to it."""
+        if not self.profiles or not self._popup:
+            return
+        _activate_for_menu(self._popup)
+        name, ok = QInputDialog.getText(self._popup, "New Profile",
+                                        "Profile name:")
+        if not ok or not name.strip():
+            return
+        pid = self.profiles.create_profile(name.strip())
+        self.profiles.add_item_to_profile(item["id"], pid)
+        self._show_toast(f'Created "{name.strip()}" · added clip')
+        self._refresh()
+
+    def _new_profile(self):
+        """Create a new empty profile (the header '+' button) and switch to it."""
+        if not self.profiles or not self._popup:
+            return
+        _activate_for_menu(self._popup)
+        name, ok = QInputDialog.getText(self._popup, "New Profile",
+                                        "Profile name:")
+        if not ok or not name.strip():
+            return
+        pid = self.profiles.create_profile(name.strip())
+        self.profiles.set_active(pid)     # jump into the new profile
+        self._show_toast(f'Created "{name.strip()}"')
+        self._refresh()
 
     def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
         """Send a history item to a profile. 'General' is special: it is
@@ -2429,8 +2629,13 @@ class DropdownPopup(QObject):
             # spread apart with exposed gaps.)
             if getattr(self, "_scroll", None) is not None:
                 max_h = min(len(items) * ITEM_HEIGHT + 4, LIST_MAX_H) if items else 100
-                self._scroll.setFixedHeight(max_h)
                 chrome = getattr(self, "_chrome_h", None)
+                if chrome:
+                    # Same screen ceiling as the build path, measured on the
+                    # monitor this popup is currently sitting on.
+                    c = popup.geometry().center()
+                    max_h = self._fit_list_h(max_h, c.x(), c.y())
+                self._scroll.setFixedHeight(max_h)
                 if chrome:
                     popup.setFixedHeight(chrome + max_h)
                 else:   # fallback — should not happen after a normal build
@@ -2439,6 +2644,10 @@ class DropdownPopup(QObject):
                         lay.activate()
                     popup.adjustSize()
         finally:
+            # The window may have grown or shrunk — slide it back inside the
+            # work area before repainting, so a taller list can't push the
+            # window through the taskbar while it's open.
+            self._reclamp_position()
             popup.setUpdatesEnabled(True)
             popup.update()
             # One more full repaint AFTER the deferred row deletions run
