@@ -25,3 +25,7 @@ keyboard==0.13.5
 
 # Getting app/process names for source tracking
 psutil==5.9.8
+
+# UI Automation (COM) — detecting in-page context menus (web/Electron
+# apps) so the overlay button can position outside their borders
+comtypes==1.4.16

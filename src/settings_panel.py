@@ -543,6 +543,8 @@ class SettingsPanel(QWidget):
 
         scroll_lay.addWidget(self._section_appearance())
         scroll_lay.addWidget(self._divider())
+        scroll_lay.addWidget(self._section_trigger())
+        scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_behaviour())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_shortcuts())
@@ -639,6 +641,68 @@ class SettingsPanel(QWidget):
         sr.addStretch()
         lay.addWidget(slider_row)
         return w
+
+    # (mode key, button label, one-line caption)
+    TRIGGER_MODES = [
+        ("double_right", "🖱  Double right-click",
+         "Right-click twice quickly to open ClipDrop at the cursor. "
+         "One hand, never covers the app's own menu."),
+        ("middle", "🖱  Middle-click",
+         "Press the scroll wheel to open ClipDrop. One hand, no menu flash. "
+         "Overrides middle-click's usual open-in-new-tab / autoscroll."),
+        ("side", "⏪  Mouse side button",
+         "Use a thumb Back/Forward button to open ClipDrop. "
+         "Needs a mouse with side buttons."),
+        ("ctrl_right", "⌨  Ctrl + right-click",
+         "Hold Ctrl and right-click to open ClipDrop. Plain right-click "
+         "stays normal. No menu flash."),
+        ("button", "🔘  Overlay button",
+         "A “Paste from ClipDrop” button appears beside the cursor on "
+         "every right-click."),
+        ("hotkey", "⌨  Hotkey only",
+         "No mouse trigger — open ClipDrop only with your keyboard "
+         "shortcut (see Shortcuts)."),
+    ]
+
+    def _section_trigger(self) -> QWidget:
+        C = self.C
+        w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
+
+        lay.addWidget(self._heading("🖱️  Popup trigger"))
+        self._trigger_mode = self.history.settings.get("trigger_mode", "double_right")
+        self._trigger_btns = {}
+
+        for mode, label, caption in self.TRIGGER_MODES:
+            row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+            btn = QPushButton(label, row)
+            btn.setFixedWidth(165)
+            btn.clicked.connect(lambda _=False, m=mode: self._set_trigger_mode(m))
+            rl.addWidget(btn)
+            cap = QLabel(caption, row)
+            cap.setWordWrap(True)
+            cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+            rl.addWidget(cap, 1)
+            self._trigger_btns[mode] = btn
+            lay.addWidget(row)
+
+        self._refresh_trigger_buttons()
+        return w
+
+    def _refresh_trigger_buttons(self):
+        C = self.C
+        active   = _btn_style(C["accent"], C["accent_hover"])
+        inactive = _btn_style(C["bg_section"], C["accent"], C["text_dim"])
+        for mode, btn in self._trigger_btns.items():
+            btn.setStyleSheet(active if mode == self._trigger_mode else inactive)
+
+    def _set_trigger_mode(self, mode: str):
+        if mode == self._trigger_mode:
+            return
+        self._trigger_mode = mode
+        self.history.save_setting("trigger_mode", mode)
+        self._refresh_trigger_buttons()
 
     def _section_behaviour(self) -> QWidget:
         C = self.C

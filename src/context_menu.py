@@ -32,10 +32,25 @@ from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout, QApplication, QMessage
 from PyQt6.QtCore    import Qt, QTimer, QPoint, pyqtSignal, QObject
 
 # ---- Windows API constants ----
-WH_MOUSE_LL   = 14
-WM_RBUTTONUP  = 0x0205
+WH_MOUSE_LL    = 14
 WM_LBUTTONDOWN = 0x0201
-WM_QUIT       = 0x0012
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP   = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP   = 0x0208
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP   = 0x020C
+WM_QUIT        = 0x0012
+VK_CONTROL     = 0x11
+
+# WinEvent hook — fired system-wide when a NATIVE menu opens/closes. Used
+# only to hide the overlay button the instant its menu is dismissed (so it
+# doesn't linger on the 3 s fallback timer). Does NOT fire for Chromium /
+# in-page menus — those keep the timer, by design.
+EVENT_SYSTEM_MENUPOPUPSTART = 0x0006
+EVENT_SYSTEM_MENUPOPUPEND    = 0x0007
+WINEVENT_OUTOFCONTEXT   = 0x0000
+WINEVENT_SKIPOWNPROCESS = 0x0002   # ignore our own popup's QMenus
 
 HOTKEY = "ctrl+shift+v"
 
@@ -73,6 +88,10 @@ class _OverlaySignals(QObject):
                                      # hotkey callbacks fire on the keyboard
                                      # library's thread; this marshals them
                                      # onto the Qt main thread.
+    open_popup_at = pyqtSignal(int, int, bool)   # mouse trigger → open the
+                                           # ClipDrop popup at (x, y). bool =
+                                           # dismiss a native menu first (only
+                                           # double-right-click flashes one).
 
 
 class OverlayButton(QWidget):
@@ -238,6 +257,15 @@ class ContextMenu:
         self._overlay = None
         self._signals = _OverlaySignals()
         self._right_click_target = None
+        self._winevent_hook  = None
+        self._menu_open_count = 0   # nesting depth of open native menus
+        # Mouse-trigger state
+        self._last_rdown = 0.0      # ms timestamp of previous right-down
+        self._last_rpos  = (0, 0)
+        self._swallow_ups = set()   # WM_*BUTTONUP codes to swallow (matches
+                                    # a DOWN we already consumed)
+        self._rclick_target = None  # foreground window at the trigger click
+        self._dbl_ms = 500          # system double-click time (set at hook start)
 
     # ── Setup / teardown ─────────────────────────────────────────────────────
 
@@ -270,6 +298,7 @@ class ContextMenu:
         self._signals.hide_overlay.connect(self._on_hide_overlay)
         self._signals.hide_popup_if_outside.connect(self._on_hide_popup_if_outside)
         self._signals.run_action.connect(self._dispatch_action)
+        self._signals.open_popup_at.connect(self._on_mouse_trigger)
 
     def _on_show_overlay(self, x, y, menu_rect):
         if self._overlay:
@@ -291,9 +320,13 @@ class ContextMenu:
             menu_rect = None
             for wait in (0.10, 0.05, 0.05, 0.05, 0.05):
                 time.sleep(wait)
-                menu_rect = self._find_context_menu_rect()
+                menu_rect = self._find_context_menu_rect(near=(x, y))
                 if menu_rect:
                     break
+            if menu_rect is None:
+                # Tier 3, one shot: in-page menus via UI Automation —
+                # by now (~300 ms) the menu is fully rendered.
+                menu_rect = self._uia_menu_rect(x, y)
             self._signals.show_overlay.emit(x, y, menu_rect)
 
         threading.Thread(target=find_and_show, daemon=True).start()
@@ -312,27 +345,224 @@ class ContextMenu:
             pass
         return True
 
-    def _find_context_menu_rect(self):
-        found = []
-        def cb(hwnd, _):
+    def _find_context_menu_rect(self, near=None):
+        """Borders (left, top, right, bottom) of the open context menu.
+
+        Tier 1 — native Win32 menus: window class '#32768'. Exact match,
+        highest confidence (Explorer, desktop, classic apps).
+
+        Tier 2 — Chromium/Electron menus (Chrome, Edge, VS Code,
+        Discord…): real top-level popup HWNDs but with app-specific
+        window classes. Identified heuristically: visible WS_POPUP
+        window, no caption, menu-like proportions, adjacent to the
+        click, owned by the foreground app's process, and not ours.
+
+        NOT findable by any HWND scan: menus that web apps draw INSIDE
+        their page (no window of their own) — those fall back to the
+        cursor-side guess in OverlayButton._beside_cursor.
+        """
+        native, popup = [], []
+        fg_pid = None
+        if near is not None:
             try:
-                if win32gui.IsWindowVisible(hwnd):
-                    if win32gui.GetClassName(hwnd) == "#32768":
-                        rect = win32gui.GetWindowRect(hwnd)
-                        if rect[2]-rect[0] > 10 and rect[3]-rect[1] > 10:
-                            found.append(rect)
+                fg = win32gui.GetForegroundWindow()
+                fg_pid = win32process.GetWindowThreadProcessId(fg)[1]
             except Exception:
                 pass
+        my_pid = os.getpid()
+
+        def cb(hwnd, _):
+            try:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                cls  = win32gui.GetClassName(hwnd)
+                rect = win32gui.GetWindowRect(hwnd)
+                w, h = rect[2] - rect[0], rect[3] - rect[1]
+
+                if cls == "#32768":                    # Tier 1
+                    if w > 10 and h > 10:
+                        native.append(rect)
+                    return
+
+                if near is None:                       # Tier 2 needs the click
+                    return
+                pid = win32process.GetWindowThreadProcessId(hwnd)[1]
+                if pid == my_pid:                      # our own popup/overlay
+                    return
+                if fg_pid is not None and pid != fg_pid:
+                    return                             # not the clicked app
+                style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+                if not (style & win32con.WS_POPUP):
+                    return
+                if (style & win32con.WS_CAPTION) == win32con.WS_CAPTION:
+                    return                             # real window, not a menu
+                if not (80 <= w <= 520 and 40 <= h <= 900):
+                    return                             # not menu proportions
+                # A context menu opens FROM the click — the click point
+                # must touch (or nearly touch) its frame.
+                x, y = near
+                M = 32
+                if not (rect[0] - M <= x <= rect[2] + M and
+                        rect[1] - M <= y <= rect[3] + M):
+                    return
+                popup.append(rect)
+            except Exception:
+                pass
+
         try:
             win32gui.EnumWindows(cb, None)
         except Exception:
             pass
-        return found[0] if found else None
+        if native:
+            return native[0]
+        if popup:
+            # Smallest candidate — submenu/tooltip windows are filtered by
+            # proportions above; the menu is the tightest fit to the click
+            return min(popup, key=lambda r: (r[2]-r[0]) * (r[3]-r[1]))
+        return None
+
+    def _uia_menu_rect(self, x, y):
+        """Tier 3 — menus drawn INSIDE an app's window (web pages and
+        Electron apps: Claude, Slack, Teams…). No HWND exists for those,
+        so no window scan can find them. Instead, ask the app's UI
+        Automation (accessibility) tree for an open menu element and use
+        its bounding rectangle.
+
+        Caveats, by design:
+        - Works only when the app exposes menus to accessibility.
+          Chromium/Electron do — but their accessibility layer wakes
+          LAZILY on the first UIA query, so the first right-click in an
+          app may miss while later ones hit.
+        - One shot only, after the fast HWND tiers missed (UIA tree
+          walks cost tens of milliseconds).
+        """
+        try:
+            import comtypes
+            import comtypes.client
+            comtypes.CoInitialize()   # fresh thread per detection run
+            try:
+                comtypes.client.GetModule("UIAutomationCore.dll")
+                from comtypes.gen.UIAutomationClient import (
+                    CUIAutomation, IUIAutomation)
+                uia = comtypes.client.CreateObject(
+                    CUIAutomation, interface=IUIAutomation)
+                fg = win32gui.GetForegroundWindow()
+                if not fg:
+                    return None
+                root = uia.ElementFromHandle(fg)
+                # UIA_ControlTypePropertyId (30003) == Menu (50009).
+                # FindAll, not FindFirst: an app can have a menu BAR in
+                # its tree too — we want the menu AT the click.
+                cond  = uia.CreatePropertyCondition(30003, 50009)
+                found = root.FindAll(4, cond)   # TreeScope_Descendants
+                if found is None:
+                    return None
+                M = 40                          # menu must touch the click
+                best = None
+                for i in range(found.Length):
+                    r = found.GetElement(i).CurrentBoundingRectangle
+                    l, t, rr, b = (int(r.left), int(r.top),
+                                   int(r.right), int(r.bottom))
+                    w, h = rr - l, b - t
+                    if not (60 <= w <= 700 and 30 <= h <= 1000):
+                        continue                # not menu proportions
+                    if not (l - M <= x <= rr + M and t - M <= y <= b + M):
+                        continue                # a menubar or distant menu
+                    area = w * h
+                    if best is None or area < best[0]:
+                        best = (area, (l, t, rr, b))
+                return best[1] if best else None
+            finally:
+                comtypes.CoUninitialize()
+        except Exception:
+            return None   # comtypes missing / app exposes nothing — fall back
 
     def _on_overlay_clicked(self):
         self.popup._paste_target = self._right_click_target
         x, y = pyautogui.position()
         self.popup.show(x, y)
+
+    def _on_mouse_trigger(self, x, y, dismiss_menu):
+        """A mouse-gesture trigger fired (main thread). The paste target
+        was captured on the click, before any menu stole focus."""
+        try:
+            self.popup._paste_target = (self._rclick_target
+                                        or win32gui.GetForegroundWindow())
+        except Exception:
+            self.popup._paste_target = None
+        if dismiss_menu:
+            try:
+                keyboard.send("esc")   # close the menu double-right flashed
+            except Exception:
+                pass
+        self.popup.show(x, y)
+
+    def _handle_trigger(self, mode, wParam, lParam, MSLLHOOKSTRUCT, user32):
+        """Per-mode mouse-trigger dispatch (hook thread). Returns True to
+        SWALLOW the event (stop it reaching the app). Runs only on real
+        button events, never on moves."""
+        def pt():
+            ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            return ms.pt.x, ms.pt.y
+
+        def capture_target():
+            try:
+                self._rclick_target = win32gui.GetForegroundWindow()
+            except Exception:
+                self._rclick_target = None
+
+        if mode == "double_right":
+            if wParam == WM_RBUTTONDOWN:
+                x, y = pt()
+                now = time.time() * 1000.0
+                if (now - self._last_rdown <= self._dbl_ms
+                        and abs(x - self._last_rpos[0]) <= 8
+                        and abs(y - self._last_rpos[1]) <= 8):
+                    # Second quick click → open ClipDrop; swallow it so the
+                    # app's menu doesn't re-toggle under our popup.
+                    self._last_rdown = 0.0
+                    self._swallow_ups.add(WM_RBUTTONUP)
+                    self._signals.open_popup_at.emit(x, y, True)   # esc menu
+                    return True
+                self._last_rdown = now
+                self._last_rpos  = (x, y)
+                capture_target()      # first click passes through (native menu)
+            return False
+
+        if mode == "button":
+            if wParam == WM_RBUTTONUP:
+                x, y = pt()
+                self._show_overlay(x, y)
+            return False
+
+        if mode == "middle":
+            if wParam == WM_MBUTTONDOWN:
+                x, y = pt(); capture_target()
+                self._swallow_ups.add(WM_MBUTTONUP)
+                self._signals.open_popup_at.emit(x, y, False)
+                return True
+            return False
+
+        if mode == "side":
+            if wParam == WM_XBUTTONDOWN:
+                x, y = pt(); capture_target()
+                self._swallow_ups.add(WM_XBUTTONUP)
+                self._signals.open_popup_at.emit(x, y, False)
+                return True
+            return False
+
+        if mode == "ctrl_right":
+            if wParam == WM_RBUTTONDOWN and (
+                    user32.GetAsyncKeyState(VK_CONTROL) & 0x8000):
+                # Ctrl+right-click → suppress the native menu entirely
+                # (swallow both down and up) and open ClipDrop. No flash.
+                x, y = pt(); capture_target()
+                self._swallow_ups.add(WM_RBUTTONUP)
+                self._signals.open_popup_at.emit(x, y, False)
+                return True
+            return False
+
+        return False   # "hotkey" mode — no mouse trigger
 
     # ── Hide popup on outside click ───────────────────────────────────────────
 
@@ -394,6 +624,13 @@ class ContextMenu:
     def _run_hook_loop(self):
         self.hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         user32 = ctypes.windll.user32
+        # Respect the user's system double-click speed for the double-
+        # right-click gesture (floor at 300 ms so it's always achievable).
+        try:
+            self._dbl_ms = max(300, user32.GetDoubleClickTime())
+        except Exception:
+            self._dbl_ms = 500
+        user32.GetAsyncKeyState.restype = ctypes.c_short   # for Ctrl+right
 
         HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
         user32.SetWindowsHookExW.restype  = ctypes.c_void_p
@@ -415,22 +652,35 @@ class ContextMenu:
 
         def hook_proc(nCode, wParam, lParam):
             # ── HOT PATH ──  This runs for EVERY mouse event on the
-            # system, including every mouse-move. Anything beyond the two
-            # button events must bail with nothing but an int compare:
-            # per-move Python work adds system-wide cursor latency, which
-            # made drag-and-drop lag terribly and could stall OLE drops.
-            if (nCode >= 0
-                    and (wParam == WM_RBUTTONUP or wParam == WM_LBUTTONDOWN)
-                    and not _DRAG_STATE["active"]):
-                try:
-                    ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                    x, y = ms.pt.x, ms.pt.y
-                    if wParam == WM_RBUTTONUP:
-                        self._show_overlay(x, y)
-                    else:
-                        self._signals.hide_popup_if_outside.emit(x, y)
-                except Exception as e:
-                    print(f"Hook proc error: {e}")
+            # system, including every mouse-move. Moves must bail on pure
+            # int compares — per-move Python work adds system-wide cursor
+            # latency (it once made drag-and-drop lag and stall OLE drops).
+            if nCode >= 0 and not _DRAG_STATE["active"]:
+                if wParam == WM_LBUTTONDOWN:
+                    try:
+                        ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                        self._signals.hide_popup_if_outside.emit(ms.pt.x, ms.pt.y)
+                    except Exception as e:
+                        print(f"Hook proc error: {e}")
+                elif (wParam == WM_RBUTTONDOWN or wParam == WM_RBUTTONUP
+                      or wParam == WM_MBUTTONDOWN or wParam == WM_MBUTTONUP
+                      or wParam == WM_XBUTTONDOWN or wParam == WM_XBUTTONUP):
+                    # Swallow the release matching a DOWN we already
+                    # consumed (keeps the click balanced for the app).
+                    if wParam in self._swallow_ups:
+                        self._swallow_ups.discard(wParam)
+                        return 1
+                    # Settings read only on real button events, never moves.
+                    try:
+                        mode = self.history.settings.get("trigger_mode", "double_right")
+                    except Exception:
+                        mode = "double_right"
+                    try:
+                        if self._handle_trigger(mode, wParam, lParam,
+                                                MSLLHOOKSTRUCT, user32):
+                            return 1   # consumed the click
+                    except Exception as e:
+                        print(f"Hook proc error: {e}")
             return user32.CallNextHookEx(self.hook_id, nCode, wParam, lParam)
 
         self._hook_proc_ref = HOOKPROC(hook_proc)
@@ -439,6 +689,34 @@ class ContextMenu:
             print("Failed to install mouse hook.")
             return
         print("Mouse hook running.")
+
+        # ── WinEvent hook: hide the overlay when its native menu closes ──
+        # Counts menu nesting so a SUBMENU opening/closing (a normal END
+        # while the parent stays open) doesn't hide the button prematurely;
+        # only the last menu closing does. Chromium / in-page menus emit no
+        # such events, so those fall through to the 3 s timer untouched.
+        WINEVENTPROC = ctypes.WINFUNCTYPE(
+            None, ctypes.c_void_p, wintypes.DWORD, wintypes.HWND,
+            wintypes.LONG, wintypes.LONG, wintypes.DWORD, wintypes.DWORD)
+        user32.SetWinEventHook.restype  = ctypes.c_void_p
+        user32.SetWinEventHook.argtypes = [
+            wintypes.DWORD, wintypes.DWORD, wintypes.HMODULE, WINEVENTPROC,
+            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD]
+        user32.UnhookWinEvent.restype  = wintypes.BOOL
+        user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+
+        def winevent_proc(hHook, event, hwnd, idObj, idChild, thread, ts):
+            try:
+                self._on_menu_event(event)
+            except Exception:
+                pass
+
+        self._winevent_proc_ref = WINEVENTPROC(winevent_proc)
+        self._winevent_hook = user32.SetWinEventHook(
+            EVENT_SYSTEM_MENUPOPUPSTART, EVENT_SYSTEM_MENUPOPUPEND,
+            None, self._winevent_proc_ref, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
+
         msg = wintypes.MSG()
         while self.running:
             result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
@@ -446,10 +724,26 @@ class ContextMenu:
                 break
             ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
             ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
+        if self._winevent_hook:
+            user32.UnhookWinEvent(self._winevent_hook)
+            self._winevent_hook = None
         if self.hook_id:
             user32.UnhookWindowsHookEx(self.hook_id)
             self.hook_id = None
             print("Mouse hook removed.")
+
+    def _on_menu_event(self, event):
+        """Native menu opened/closed (WinEvent thread). Tracks nesting so
+        only the LAST menu closing hides the overlay — a submenu closing
+        while its parent stays open must not. Emits on the signal so the
+        actual hide runs on the Qt main thread."""
+        if event == EVENT_SYSTEM_MENUPOPUPSTART:
+            self._menu_open_count += 1
+        elif event == EVENT_SYSTEM_MENUPOPUPEND:
+            self._menu_open_count -= 1
+            if self._menu_open_count <= 0:
+                self._menu_open_count = 0
+                self._signals.hide_overlay.emit()
 
     def _uninstall_mouse_hook(self):
         if self.hook_thread_id:

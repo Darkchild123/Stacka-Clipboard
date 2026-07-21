@@ -192,6 +192,7 @@ ClipDrop/
 - [x] System tray icon
 - [x] Settings panel (history size, themes, transparency, close behaviour, profiles)
 - [ ] Installer / packaged .exe for Windows
+- [ ] Code-sign the executable (avoids AV false-positives from the mouse hook)
 
 ### Delivered beyond MVP
 - [x] Search through clipboard history (live filtering)
@@ -206,10 +207,50 @@ ClipDrop/
 - [x] Drag & drop items out of ClipDrop into any app
 - [x] Snippet scratchpad — type a note, save it straight into history
 - [x] Pause/resume capture, clear history, and profile cycling by hotkey
+- [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
 - [ ] Windows Store packaging
+
+---
+
+## Known Limitations
+
+These are inherent to how Windows secures and renders the desktop — not
+bugs, but constraints ClipDrop works within.
+
+### Apps running as Administrator
+
+Windows' User Interface Privilege Isolation (UIPI) forbids a normal-
+privilege process from inspecting, hooking, or drawing over a window
+owned by a **higher-privilege** process. So when ClipDrop runs normally
+(the recommended way), its "Paste from ClipDrop" overlay button will
+**not appear** over apps launched as Administrator — an elevated
+Terminal, Task Manager, or an IDE run as admin. The clipboard itself
+still works everywhere; only the right-click overlay is blocked for
+those windows. Running ClipDrop itself as Administrator lifts the
+restriction, at the cost of the app starting elevated.
+
+### In-page (web / Electron) context menus
+
+Apps that draw their right-click menus inside their own window as
+HTML — the Claude app, Slack, Teams, some web apps — expose no window
+handle to measure. ClipDrop falls back to **UI Automation** (the
+accessibility layer) to read those menus' bounds. This works for most
+Chromium/Electron apps, but their accessibility tree wakes *lazily*, so
+the very first right-click in a freshly launched app may miss (the
+button positions by cursor heuristic); subsequent clicks land correctly.
+Apps that expose nothing to accessibility keep the cursor-side fallback.
+
+### Distribution note — code signing
+
+ClipDrop uses a low-level mouse hook (`SetWindowsHookEx`) for its
+system-wide right-click detection. This is legitimate, but unsigned
+executables using such hooks can trip antivirus heuristics. Before the
+Microsoft Store release the packaged `.exe` must be **digitally signed**
+(the Store submission process handles this) so Defender and third-party
+AV recognise it as trusted.
 
 ---
 
@@ -387,6 +428,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-19 | Stability pass — threaded paste, crash fixes, popup persistence, side-panel actions, live settings |
 | 2026-07-20 | Visual overhaul — floating rounded cards with shadows, gradient surfaces, accent scrollbars, fluid hover motion, live in-place updates |
 | 2026-07-20 | Interactivity update — shortcuts manager with 5 rebindable global hotkeys, snippet scratchpad, Ctrl+click multi-selection with combined paste, drag & drop out, smarter overlay button positioning, profile-switch and context-menu stability fixes |
+| 2026-07-21 | Trigger modes — six ways to summon the popup (double right-click default, middle-click, side button, Ctrl+right-click, overlay button, hotkey-only); 3-tier context-menu detection (native / Chromium / UI Automation); instant overlay hide on menu close |
 
 ---
 
@@ -632,4 +674,90 @@ exactly from a chrome-height measurement taken at build time).
 list, side panels, nested panels — now include General everywhere it
 makes sense; sending a side-panel file there creates its own visible
 history entry.
+
+---
+
+### 🎯 Trigger Modes & Context-Menu Handling (July 2026)
+
+**Status:** ✅ Complete
+
+This update reworks *how ClipDrop is summoned* on a right-click, and it
+was the result of chasing a problem that turned out to be unwinnable in
+its original framing.
+
+#### The problem
+
+ClipDrop needs to offer "Paste from ClipDrop" wherever you right-click.
+On the Windows Shell (Desktop, File Explorer) it injects a real entry
+into the native menu through the registry — clean and native. But every
+other app builds its **own** right-click menu and allows no external
+injection. For those, ClipDrop floated a small "📋 Paste from ClipDrop"
+button near the cursor.
+
+That button kept **overlapping the app's own context menu**. The fix
+seemed obvious — measure the menu's rectangle and place the button just
+outside its border — so the detection was built out in three tiers:
+
+1. **Native menus** (window class `#32768`) — Explorer, classic apps.
+   Measured exactly.
+2. **Chromium / Electron popup windows** (Chrome, VS Code, Discord) —
+   real top-level windows but with app-specific classes, identified by a
+   heuristic (visible borderless popup, menu-like proportions, adjacent
+   to the click, owned by the foreground app).
+3. **In-page menus** (the Claude app, Slack, web apps) — drawn as HTML
+   *inside* the app's own window, with **no window handle at all**. The
+   only way to read their bounds is Windows **UI Automation** (the
+   accessibility tree), queried for an open `Menu` element near the
+   click. (Adds the `comtypes` dependency.)
+
+The overlay button placement was also rewritten to **anchor at the
+cursor and hug the menu's nearest border**, clamped to the monitor the
+click happened on (an earlier version drifted across the screen and even
+onto the taskbar).
+
+#### The breakthrough — stop fighting the menu
+
+Even with three tiers, detection can't be universal: some apps expose
+nothing to accessibility, and their accessibility layer wakes *lazily*,
+so the first right-click in a fresh app misses. When detection fails,
+placement is a guess — and web menus open in any direction, so the guess
+sometimes lands right on the menu. **A cursor-anchored button has an
+irreducible overlap rate: when you can't measure the menu, you can't
+reliably avoid it.**
+
+The insight was to change the question. The overlap only exists because
+the trigger *is* the right-click — the same gesture that opens the menu
+we're trying to dodge. Trigger ClipDrop with a **different** gesture and
+there is no button to overlap, in any app, ever — no detection required.
+
+So the overlay button became one option among several **trigger modes**
+(Settings → Popup trigger):
+
+| Mode | How it fires | Menu flash |
+|---|---|---|
+| **Double right-click** (default) | Two quick right-clicks | brief |
+| **Middle-click** | Press the scroll wheel | none |
+| **Mouse side button** | A thumb Back/Forward button | none |
+| **Ctrl + right-click** | Hold Ctrl, then right-click | none |
+| **Overlay button** | Button appears on right-click | — |
+| **Hotkey only** | Keyboard shortcut only | — |
+
+Every gesture-based mode opens the popup directly at the cursor with the
+correct paste target (captured on the click, before any menu steals
+focus). The click is **swallowed cleanly** — both button-down and its
+matching up — so the app never sees a half-click. Only double-right-click
+briefly flashes the native menu (its first click is a normal right-click
+by design); an Escape dismisses it as the popup opens. The others open
+with no flash at all.
+
+#### Known trade-offs (documented, not bugs)
+
+- **Middle-click / side button** override that button's normal use
+  (open-in-new-tab, Back/Forward) while the mode is active — the cost of
+  a dedicated one-hand trigger.
+- **Admin/UIPI:** a normal-privilege ClipDrop can't overlay or trigger
+  over apps running as Administrator. See *Known Limitations*.
+- **Instant hide:** when the overlay button mode is used, a WinEvent hook
+  now hides the button the moment its native menu closes (submenu-safe
+  via a nesting count), instead of lingering on the fallback timer.
 
