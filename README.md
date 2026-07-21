@@ -212,6 +212,7 @@ ClipDrop/
 - [x] Pause/resume capture, clear history, and profile cycling by hotkey
 - [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
 - [x] SVG icon system with selectable icon packs and per-extension detection
+- [x] Adjustable UI sizing (window, rows, side list) in 10% steps
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -434,6 +435,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-20 | Interactivity update — shortcuts manager with 5 rebindable global hotkeys, snippet scratchpad, Ctrl+click multi-selection with combined paste, drag & drop out, smarter overlay button positioning, profile-switch and context-menu stability fixes |
 | 2026-07-21 | Trigger modes — six ways to summon the popup (double right-click default, middle-click, side button, Ctrl+right-click, overlay button, hotkey-only); 3-tier context-menu detection (native / Chromium / UI Automation); instant overlay hide on menu close |
 | 2026-07-21 | Icon system rebuilt as SVG (crisp at every size), dedicated Python icon and smart type detection, plus an optional per-extension "Labeled documents" icon pack selectable in Settings |
+| 2026-07-21 | Adjustable sizing — three sliders (main window, row size, side list) scaling the UI 60–120% in fixed 10% steps, with dependent values derived automatically |
 
 ---
 
@@ -835,4 +837,54 @@ preference: **Python**, **shell/bash**, and **clipboard text**. Any
 extension a pack doesn't define falls back to the Default set, so no
 icon is ever missing. Switching packs applies immediately to an open
 popup.
+
+---
+
+### 📐 Adjustable Sizing (July 2026)
+
+**Status:** ✅ Complete
+
+Settings → **Sizing** lets the user scale the interface with three
+sliders, each running **60% to 120% in fixed 10% steps**, where 100% is
+the app's default size:
+
+| Slider | Scales |
+|---|---|
+| **Main window** | popup width and the preview text wrap width |
+| **Row size** | row height, row icon, and the list height cap |
+| **Side list** | side panel width, row height, font, and row icons |
+
+#### Deliberately coarse
+
+The steps are fixed rather than free-form on purpose. Each slider works
+internally in 10% units (positions 6–12), so **every position it can
+reach is a valid size** — there is no snapping logic and no way to land
+on a broken layout. Stored values are defended too: anything out of
+range clamps to 60/120, off-step numbers snap to the nearest step, and
+an unreadable value falls back to 100%.
+
+#### Values that move together are derived, not exposed
+
+Adding a slider for every measurement would let users create layouts
+that look wrong — a wide window with narrow text, or tall rows with tiny
+icons. So the dependent values are computed from the three sliders
+instead:
+
+- the row **icon** scales with row height
+- the preview **text wrap width** scales with window width
+- the list **height cap** scales with row height, so roughly the same
+  number of rows stays visible at any size
+- the side list's **font and row icons** scale with the panel
+
+#### Applying
+
+Sliders live-apply through the popup's normal rebuild path, debounced by
+180 ms so dragging across several steps rebuilds once when the user
+settles rather than on every step. The exact-height layout machinery
+(measuring the window's fixed "chrome" and computing height from the row
+count) absorbs the new sizes automatically.
+
+The section is intentionally compact — three single-line rows — because
+at this window width per-row captions wrap to several lines and would
+triple the height of the section for no added clarity.
 

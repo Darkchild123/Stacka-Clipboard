@@ -543,6 +543,8 @@ class SettingsPanel(QWidget):
 
         scroll_lay.addWidget(self._section_appearance())
         scroll_lay.addWidget(self._divider())
+        scroll_lay.addWidget(self._section_sizing())
+        scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_icons())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_trigger())
@@ -665,6 +667,74 @@ class SettingsPanel(QWidget):
          "No mouse trigger — open ClipDrop only with your keyboard "
          "shortcut (see Shortcuts)."),
     ]
+
+    # (settings key, label) — each slider is 60–120% in 10% steps,
+    # 100% = the app's default size. Deliberately caption-free: at this
+    # window width a per-row caption wraps to 2-3 lines and triples the
+    # section's height.
+    SIZE_SLIDERS = [
+        ("scale_popup", "Main window"),
+        ("scale_row",   "Row size"),
+        ("scale_panel", "Side list"),
+    ]
+
+    def _section_sizing(self) -> QWidget:
+        C = self.C
+        w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,4,0,4); lay.setSpacing(2)
+
+        head = QWidget(w); head.setStyleSheet(f"background:{C['bg']};")
+        hl = QHBoxLayout(head); hl.setContentsMargins(0,0,0,0); hl.setSpacing(8)
+        hl.addWidget(self._heading("📐  Sizing"))
+        hint = QLabel("10% steps · 100% = default", head)
+        hint.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+        hl.addWidget(hint); hl.addStretch()
+        lay.addWidget(head)
+
+        # One debounce timer for all sliders: rebuild the popup once the
+        # user settles, not on every step of a drag.
+        self._size_timer = QTimer(self)
+        self._size_timer.setSingleShot(True)
+        self._size_timer.timeout.connect(self._apply_to_app)
+
+        self._size_lbls = {}
+        for key, label in self.SIZE_SLIDERS:
+            row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+            row.setFixedHeight(24)
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+
+            name = QLabel(label, row); name.setFixedWidth(88)
+            name.setStyleSheet(f"color:{C['text']};background:transparent;")
+            rl.addWidget(name)
+
+            # Slider works in 10% units (6..12) so every position is a
+            # valid step — no snapping logic, no invalid sizes.
+            pct = int(self.history.settings.get(key, 100))
+            pct = max(60, min(120, int(round(pct / 10.0) * 10)))
+            sld = QSlider(Qt.Orientation.Horizontal, row)
+            sld.setRange(6, 12)
+            sld.setValue(pct // 10)
+            sld.setSingleStep(1); sld.setPageStep(1)
+            sld.setFixedWidth(210)
+            sld.setStyleSheet(f"""
+                QSlider::groove:horizontal {{background:{C['bg_section']};height:5px;border-radius:3px;}}
+                QSlider::handle:horizontal {{background:{C['accent']};width:13px;height:13px;
+                    border-radius:7px;margin:-4px 0;}}
+            """)
+            val = QLabel(f"{pct}%", row); val.setFixedWidth(40)
+            val.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+            sld.valueChanged.connect(
+                lambda v, k=key, l=val: self._on_size_change(k, v, l))
+            self._size_lbls[key] = val
+            rl.addWidget(sld); rl.addWidget(val); rl.addStretch()
+            lay.addWidget(row)
+        return w
+
+    def _on_size_change(self, key: str, steps: int, label: QLabel):
+        pct = steps * 10
+        label.setText(f"{pct}%")
+        self.history.save_setting(key, pct)
+        self._size_timer.start(180)   # debounce → one popup rebuild
 
     ICON_PACKS = [
         ("default", "🎨  Default ClipDrop",

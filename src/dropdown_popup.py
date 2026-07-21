@@ -532,12 +532,61 @@ def _content_count(item: dict):
     return None
 
 
-# ── Item row widget ───────────────────────────────────────────────────────────
+# ── Sizing ────────────────────────────────────────────────────────────────────
+# Base (100%) metrics. The Sizing sliders in Settings scale these in fixed
+# 10% steps between 60% and 120% — deliberately coarse so no setting can
+# produce a broken layout. apply_scales() recomputes the live values below
+# before each popup build; widgets read the live values at construction.
 
-POPUP_WIDTH = 420
-ITEM_HEIGHT = 76
-THUMB_SIZE  = 36
+_BASE_POPUP_WIDTH = 420    # main window width
+_BASE_ITEM_HEIGHT = 76     # main list row height
+_BASE_THUMB_SIZE  = 36     # row icon / thumbnail
+_BASE_PREVIEW_W   = 240    # preview text wrap width (follows window width)
+_BASE_LIST_MAX_H  = 480    # list height cap (follows row height)
+_BASE_PANEL_W     = 280    # side list width
+_BASE_PANEL_ROW_H = 26     # side list row height
+
+POPUP_WIDTH = _BASE_POPUP_WIDTH
+ITEM_HEIGHT = _BASE_ITEM_HEIGHT
+THUMB_SIZE  = _BASE_THUMB_SIZE
+PREVIEW_W   = _BASE_PREVIEW_W
+LIST_MAX_H  = _BASE_LIST_MAX_H
 PADDING     = 10
+
+SCALE_MIN, SCALE_MAX, SCALE_STEP = 60, 120, 10
+
+
+def clamp_scale(pct) -> int:
+    """Snap a scale to a valid 10% step inside 60–120%."""
+    try:
+        pct = int(pct)
+    except (TypeError, ValueError):
+        pct = 100
+    pct = max(SCALE_MIN, min(SCALE_MAX, pct))
+    return int(round(pct / SCALE_STEP) * SCALE_STEP)
+
+
+def apply_scales(popup_pct=100, row_pct=100, panel_pct=100):
+    """Apply the Settings sizing sliders. Values that must move together
+    (icon with row height, text wrap with window width, list cap with row
+    height) are derived here rather than exposed as separate sliders."""
+    global POPUP_WIDTH, ITEM_HEIGHT, THUMB_SIZE, PREVIEW_W, LIST_MAX_H
+    p = clamp_scale(popup_pct) / 100.0
+    r = clamp_scale(row_pct)   / 100.0
+    s = clamp_scale(panel_pct) / 100.0
+
+    POPUP_WIDTH = int(_BASE_POPUP_WIDTH * p)
+    PREVIEW_W   = int(_BASE_PREVIEW_W   * p)
+    ITEM_HEIGHT = int(_BASE_ITEM_HEIGHT * r)
+    THUMB_SIZE  = int(_BASE_THUMB_SIZE  * r)
+    LIST_MAX_H  = int(_BASE_LIST_MAX_H  * r)
+    # Side list (class attributes — read when a panel is constructed)
+    SidePanelWidget.PANEL_W = int(_BASE_PANEL_W * s)
+    SidePanelWidget.ROW_H   = max(16, int(_BASE_PANEL_ROW_H * s))
+    SidePanelWidget.SCALE   = s
+
+
+# ── Item row widget ───────────────────────────────────────────────────────────
 
 
 class ItemRowWidget(QWidget):
@@ -630,7 +679,7 @@ class ItemRowWidget(QWidget):
         preview = self.history.get_preview(item)
         self._preview_lbl = QLabel(preview, self)
         self._preview_lbl.setWordWrap(True)
-        self._preview_lbl.setMaximumWidth(240)
+        self._preview_lbl.setMaximumWidth(PREVIEW_W)   # follows window width
         self._preview_lbl.setFont(QFont("Segoe UI", 10))
         self._preview_lbl.setStyleSheet(f"color:{C['text_preview']};background:transparent;")
         text_col.addWidget(self._preview_lbl)
@@ -1008,8 +1057,11 @@ class _PinDelegate(QStyledItemDelegate):
 class SidePanelWidget(QWidget):
     """Floating panel to the right of the popup listing files in a multi-file item."""
 
+    # Live values — apply_scales() rewrites PANEL_W / ROW_H / SCALE from the
+    # Settings "Side list" slider before a panel is constructed.
     PANEL_W     = 280
     ROW_H       = 26    # compact rows — smaller font, more files in view
+    SCALE       = 1.0   # side-list size multiplier (font + row icons follow)
     MAX_VISIBLE = 10    # first 10 files visible; scrolling reveals the rest
 
     def __init__(self, files: list, item: dict, history, colours: dict,
@@ -1105,17 +1157,21 @@ class SidePanelWidget(QWidget):
         self._list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.itemSelectionChanged.connect(self._on_selection_changed)
+        # Font and row-icon size follow the side-list scale so the panel
+        # stays proportional at every slider position.
+        _font_px = max(8, int(11 * self.SCALE))
+        self._row_icon_px = max(12, int(16 * self.SCALE))
         self._list.setStyleSheet(f"""
             QListWidget {{ background:{colours['bg']}; border:none; outline:none; }}
             QListWidget::item {{ height:{self.ROW_H}px; color:{colours['text']};
-                                 font-size:11px; padding-left:6px;
+                                 font-size:{_font_px}px; padding-left:6px;
                                  padding-right:36px; /* clear of count + pin */ }}
             QListWidget::item:hover {{ background:{colours['bg_hover']}; }}
             QListWidget::item:selected {{ background:{colours['bg_hover']}; }}
         """ + _scrollbar_qss(colours))
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._list.setFixedWidth(self.PANEL_W)
-        self._list.setIconSize(QSize(16, 16))
+        self._list.setIconSize(QSize(self._row_icon_px, self._row_icon_px))
         self._list.setItemDelegate(_PinDelegate(colours, self._list))
         max_visible = min(len(files), self.MAX_VISIBLE)
         self._list.setFixedHeight(max_visible * self.ROW_H)
@@ -1407,7 +1463,7 @@ class SidePanelWidget(QWidget):
                     qi.setData(_COUNT_ROLE, len(os.listdir(fp)))
                 except OSError:
                     pass   # unreadable folder — no count shown
-            qi.setIcon(QIcon(_icon_pixmap(itype, 16, ext=row_ext)))
+            qi.setIcon(QIcon(_icon_pixmap(itype, self._row_icon_px, ext=row_ext)))
             self._list.addItem(qi)
 
     def _row_of(self, fp: str) -> int:
@@ -1676,6 +1732,9 @@ class DropdownPopup(QObject):
         self._opacity = self.history.settings.get("transparency", 1.0) if self.history else 1.0
         if self.history:
             set_icon_pack(self.history.settings.get("icon_pack", "default"))
+            apply_scales(self.history.settings.get("scale_popup", 100),
+                         self.history.settings.get("scale_row",   100),
+                         self.history.settings.get("scale_panel", 100))
         C = self._colours
 
         # Get items
@@ -1765,7 +1824,7 @@ class DropdownPopup(QObject):
         scroll.setStyleSheet(f"QScrollArea{{border:none;background:{C['bg']};}} "
                              + _scrollbar_qss(C))
         scroll.setFixedWidth(POPUP_WIDTH + 10)
-        max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
+        max_h = min(len(items) * ITEM_HEIGHT + 4, LIST_MAX_H) if items else 100
         scroll.setFixedHeight(max_h)
         main_lay.addWidget(scroll)
         self._scroll = scroll   # kept so _refresh can resize in place
@@ -2272,7 +2331,7 @@ class DropdownPopup(QObject):
             # stale hint left the window tall and the fixed-height children
             # spread apart with exposed gaps.)
             if getattr(self, "_scroll", None) is not None:
-                max_h = min(len(items) * ITEM_HEIGHT + 4, 480) if items else 100
+                max_h = min(len(items) * ITEM_HEIGHT + 4, LIST_MAX_H) if items else 100
                 self._scroll.setFixedHeight(max_h)
                 chrome = getattr(self, "_chrome_h", None)
                 if chrome:
