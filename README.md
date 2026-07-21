@@ -213,6 +213,7 @@ ClipDrop/
 - [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
 - [x] SVG icon system with selectable icon packs and per-extension detection
 - [x] Adjustable UI sizing (window, rows, side list) in 10% steps
+- [x] Open files / folders / links straight from the list (right-click)
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -436,6 +437,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-21 | Trigger modes — six ways to summon the popup (double right-click default, middle-click, side button, Ctrl+right-click, overlay button, hotkey-only); 3-tier context-menu detection (native / Chromium / UI Automation); instant overlay hide on menu close |
 | 2026-07-21 | Icon system rebuilt as SVG (crisp at every size), dedicated Python icon and smart type detection, plus an optional per-extension "Labeled documents" icon pack selectable in Settings |
 | 2026-07-21 | Adjustable sizing — three sliders (main window, row size, side list) scaling the UI 60–120% in fixed 10% steps, with dependent values derived automatically |
+| 2026-07-21 | Open items from the list — right-click Open / Open containing folder for files, folders and links, with existence checking moved off the UI thread so dead network paths can't freeze the app |
 
 ---
 
@@ -887,4 +889,64 @@ count) absorbs the new sizes automatically.
 The section is intentionally compact — three single-line rows — because
 at this window width per-row captions wrap to several lines and would
 triple the height of the section for no added clarity.
+
+---
+
+### 📂 Open Items From the List (July 2026)
+
+**Status:** ✅ Complete
+
+Right-clicking an item now offers **Open** and **Open containing
+folder**, in both the main list and the file side panels.
+
+| Item | What Open does |
+|---|---|
+| Single file | Launches it with its default app |
+| Folder | Opens it in Explorer |
+| Multi-file entry | *Reveal only* — never opens dozens of files at once |
+| Image | Opens the PNG ClipDrop saved for it |
+| URL | Opens it in the default browser |
+| Text / code / hex | No Open entries — there is nothing to open |
+
+#### The hard part: checking whether the file still exists
+
+Clipboard history is persistent, so entries routinely point at files
+that have since been moved, renamed or deleted — or that live on a drive
+which is no longer attached. Verifying that is not free:
+
+> `os.path.exists()` on a **disconnected network share, an unplugged USB
+> drive or a sleeping NAS blocks for seconds** while Windows waits out
+> its timeout.
+
+Doing that check on the UI thread would freeze the entire app — and it
+would freeze it precisely when building a right-click menu, which is the
+worst possible moment. So the rule here is absolute: **the UI thread
+never touches the filesystem.**
+
+- **Building the menu** uses string operations only (splitting an
+  extension, counting a list). The menu appears instantly even for an
+  item pointing at a dead network path.
+- **Existence checking and launching** happen on an `_OpenWorker` thread.
+  If the file is gone, the worker reports back and the user gets a clear
+  toast — *"⚠ No longer exists: report.pdf"* — instead of a silent
+  failure or a Windows error dialog.
+
+This was verified against an unroutable UNC path: the call returned in
+under 0.15 s while the worker sat blocked for the full SMB timeout.
+
+#### Opening an executable runs it
+
+A misclick in a list is far easier than a deliberate double-click in
+Explorer, so Open on `.exe`, `.msi`, `.bat`, `.ps1`, `.vbs`, `.lnk` and
+similar asks for confirmation first. The check is on the extension
+string, so it costs nothing and never touches the disk. *Open containing
+folder* never triggers it.
+
+#### Shutdown safety
+
+Destroying a running `QThread` aborts the process — and a dead network
+path can legitimately keep a worker busy for the whole timeout. Quitting
+ClipDrop shortly after opening a stale network file would therefore have
+crashed on exit, so in-flight checks are given a moment to finish during
+shutdown.
 

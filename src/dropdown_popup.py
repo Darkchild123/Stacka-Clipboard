@@ -20,6 +20,8 @@ import io
 import time
 import struct
 import hashlib
+import subprocess
+import webbrowser
 
 import win32clipboard
 import win32con
@@ -34,6 +36,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QScrollArea, QFrame,
     QAbstractItemView, QMenu, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStyledItemDelegate,
+    QMessageBox,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
@@ -1402,6 +1405,13 @@ class SidePanelWidget(QWidget):
                 QMenu::item:selected {{ background:{C['bg_hover']}; }}
             """)
 
+            # Open / reveal first — the most common intent when browsing
+            # individual files. No filesystem access while building the
+            # menu; the worker checks existence off the UI thread.
+            menu.addAction("📂  Open").setData(("open", None, None))
+            menu.addAction("📁  Open containing folder").setData(("reveal", None, None))
+            menu.addSeparator()
+
             # Send to profile ▸ — ALL profiles are valid targets here,
             # including the active one and General. Unlike a main-list
             # item, a file inside a multi-file entry is not individually
@@ -1433,7 +1443,11 @@ class SidePanelWidget(QWidget):
         if not chosen or not chosen.data():
             return
         action, prof_id, prof_name = chosen.data()
-        if action == "send":
+        if action == "open":
+            ctrl.open_path(fp)
+        elif action == "reveal":
+            ctrl.open_path(fp, reveal=True)
+        elif action == "send":
             self._send_file_to_profile(fp, prof_id, prof_name)
         elif action == "pin":
             self._toggle_file_pin(fp)
@@ -1554,6 +1568,52 @@ class _PopupSignals(QObject):
     esc_sig  = pyqtSignal()           # Escape pressed (global keyboard hook —
                                       # QShortcut needs an ACTIVE window and
                                       # the popup is WS_EX_NOACTIVATE)
+
+
+# Extensions whose "Open" actually RUNS something. A misclick in a list is
+# far easier than a deliberate double-click in Explorer, so these confirm.
+_EXEC_EXTS = {".exe", ".msi", ".bat", ".cmd", ".ps1", ".vbs", ".vbe",
+              ".js", ".jse", ".wsf", ".scr", ".com", ".reg", ".jar", ".lnk"}
+
+
+class _OpenWorker(QThread):
+    """Verify a path exists, then open or reveal it — OFF the UI thread.
+
+    os.path.exists() is NOT cheap in the general case: on a disconnected
+    network share, an unplugged USB drive or a sleeping NAS it blocks for
+    seconds while Windows times out. Clipboard history is persistent, so
+    stale paths like that are normal — checking on the UI thread would
+    freeze the whole app. Everything that touches the filesystem happens
+    here; the UI thread only ever does string work (extension checks).
+
+    Signals:
+        failed(path, reason) — 'missing' if gone, else the error text.
+    """
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, path: str, reveal: bool = False, parent=None):
+        super().__init__(parent)
+        self._path   = path
+        self._reveal = reveal
+
+    def run(self):
+        p = self._path
+        try:
+            if not os.path.exists(p):
+                self.failed.emit(p, "missing")
+                return
+        except Exception:
+            self.failed.emit(p, "missing")
+            return
+        try:
+            if self._reveal:
+                # Explorer wants "/select,PATH" as ONE token; this opens the
+                # parent folder with the item highlighted (works for folders).
+                subprocess.Popen(["explorer", "/select," + os.path.normpath(p)])
+            else:
+                os.startfile(p)          # default handler for its type
+        except Exception as e:
+            self.failed.emit(p, str(e))
 
 
 class _PasteWorker(QThread):
@@ -1685,10 +1745,17 @@ class DropdownPopup(QObject):
         self._side_panel  = None   # SidePanelWidget if open
         self._paste_target = None  # hwnd of window that was focused at right-click
         self._paste_worker = None  # _PasteWorker QThread while a paste runs
+        self._open_workers = set() # live _OpenWorker threads (GC guard)
         self._hover_timer = None   # cursor poll for hover-to-close mode
         self._hover_seen_inside = False
         self._selected_ids = set() # Ctrl+click multi-selection (item ids)
         self._colours     = DARK   # Current theme dict
+
+        # Don't let Qt destroy a running open-check thread at shutdown
+        try:
+            QApplication.instance().aboutToQuit.connect(self._stop_open_workers)
+        except Exception:
+            pass
 
         # Thread-safe signals — connected to slots that run on this object's thread
         self._sig = _PopupSignals()
@@ -2188,7 +2255,7 @@ class DropdownPopup(QObject):
             self._refresh()
 
     def _show_send_to_menu(self, item: dict, gpos: QPoint):
-        if not self.profiles or not self._popup:
+        if not self._popup:
             return
         menu = QMenu(self._popup)   # dies with the popup — never orphaned
         menu.setStyleSheet(f"""
@@ -2196,20 +2263,50 @@ class DropdownPopup(QObject):
                      border:1px solid {self._colours['border']}; font-family:'Segoe UI'; }}
             QMenu::item:selected {{ background:{self._colours['bg_hover']}; }}
         """)
-        menu.addAction("Send to profile…").setEnabled(False)
-        menu.addSeparator()
-        # Every profile EXCEPT the one currently shown (sending an item to
-        # the profile you're looking at is a no-op). General included.
-        active_id = self.profiles.get_active_profile()["id"]
-        for prof in self.profiles.get_all_profiles():
-            if prof["id"] == active_id:
-                continue
-            act = menu.addAction(prof["name"])
-            act.setData(prof["id"])
+
+        # ── Open actions (no filesystem access here — string checks only) ──
+        if item.get("type") == "url":
+            menu.addAction("🌐  Open link").setData(("openurl", str(item.get("content", ""))))
+            menu.addSeparator()
+        else:
+            op, rev = self._openable(item)
+            if op:
+                menu.addAction("📂  Open").setData(("open", op))
+            if rev:
+                menu.addAction("📁  Open containing folder").setData(("reveal", rev))
+            if op or rev:
+                menu.addSeparator()
+
+        # ── Send to profile ──
+        if self.profiles:
+            menu.addAction("Send to profile…").setEnabled(False)
+            # Every profile EXCEPT the one currently shown (sending an item to
+            # the profile you're looking at is a no-op). General included.
+            active_id = self.profiles.get_active_profile()["id"]
+            for prof in self.profiles.get_all_profiles():
+                if prof["id"] == active_id:
+                    continue
+                menu.addAction(prof["name"]).setData(("send", prof["id"]))
+
+        if menu.isEmpty():
+            return
         _activate_for_menu(self._popup)   # menu needs an ACTIVE owner to grab
         chosen = menu.exec(gpos)
-        if chosen and chosen.data():
-            self._send_item_to_profile(item, chosen.data(), chosen.text())
+        data = chosen.data() if chosen else None
+        if not data:
+            return
+        action, value = data
+        if action == "open":
+            self.open_path(value)
+        elif action == "reveal":
+            self.open_path(value, reveal=True)
+        elif action == "openurl":
+            try:
+                webbrowser.open(value)
+            except Exception as e:
+                print(f"[ClipDrop] Could not open URL: {e}")
+        elif action == "send":
+            self._send_item_to_profile(item, value, chosen.text())
 
     def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
         """Send a history item to a profile. 'General' is special: it is
@@ -2355,6 +2452,68 @@ class DropdownPopup(QObject):
 
         # Close-behaviour setting may have changed
         self._start_hover_close_if_enabled()
+
+    # ── Open / reveal ────────────────────────────────────────────────────────
+
+    def _openable(self, item: dict):
+        """(open_path, reveal_path) for an item — both may be None.
+        Pure string work: never touches the filesystem, so it's safe to
+        call while building a menu."""
+        t, c = item.get("type"), item.get("content")
+        if t == "file" and isinstance(c, list) and c:
+            if len(c) == 1:
+                return c[0], c[0]
+            return None, c[0]      # multi-file: reveal only, never open N files
+        if t == "image" and c:
+            return str(c), str(c)  # the PNG ClipDrop saved
+        return None, None
+
+    def open_path(self, path: str, reveal: bool = False):
+        """Open (or reveal) a path without ever blocking the UI thread.
+
+        The only UI-thread work is an extension check — a string op — so a
+        dead network path can't freeze the menu. Existence checking and
+        launching happen on an _OpenWorker.
+        """
+        if not path:
+            return
+        if not reveal and os.path.splitext(path)[1].lower() in _EXEC_EXTS:
+            # This would RUN the file — confirm before launching.
+            name = os.path.basename(path)
+            if QMessageBox.question(
+                    None, "Run file?",
+                    f"“{name}” is an executable.\n\nOpening it will RUN it. "
+                    f"Continue?",
+                    QMessageBox.StandardButton.Yes |
+                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+        worker = _OpenWorker(path, reveal=reveal, parent=self)
+        worker.failed.connect(self._on_open_failed)
+        worker.finished.connect(lambda w=worker: self._open_workers.discard(w)
+                                or w.deleteLater())
+        self._open_workers.add(worker)   # keep a ref — GC mid-run would crash
+        worker.start()
+        self._show_toast(("Revealing  " if reveal else "Opening  ")
+                         + os.path.basename(path))
+
+    def _stop_open_workers(self):
+        """Let in-flight open checks finish before Qt tears the app down.
+        Destroying a still-running QThread aborts the process — and a dead
+        network path can legitimately sit inside os.path.exists() for the
+        whole SMB timeout. Wait briefly, then let go."""
+        for w in list(self._open_workers):
+            try:
+                if w.isRunning():
+                    w.wait(1500)
+            except RuntimeError:
+                pass
+
+    def _on_open_failed(self, path: str, reason: str):
+        if reason == "missing":
+            self._show_toast(f"⚠ No longer exists:  {os.path.basename(path)}")
+        else:
+            print(f"[ClipDrop] Open failed for {path}: {reason}")
+            self._show_toast(f"⚠ Could not open  {os.path.basename(path)}")
 
     # ── Multi-selection + drag-out ───────────────────────────────────────────
 
