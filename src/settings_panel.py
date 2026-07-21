@@ -543,6 +543,8 @@ class SettingsPanel(QWidget):
 
         scroll_lay.addWidget(self._section_appearance())
         scroll_lay.addWidget(self._divider())
+        scroll_lay.addWidget(self._section_icons())
+        scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_trigger())
         scroll_lay.addWidget(self._divider())
         scroll_lay.addWidget(self._section_behaviour())
@@ -663,6 +665,53 @@ class SettingsPanel(QWidget):
          "No mouse trigger — open ClipDrop only with your keyboard "
          "shortcut (see Shortcuts)."),
     ]
+
+    ICON_PACKS = [
+        ("default", "🎨  Default ClipDrop",
+         "Colourful modern icons — Office letter tiles, the Python logo, "
+         "gears, and more."),
+        ("labeled", "🏷  Labeled documents",
+         "Document-style icons with the file extension shown as a badge "
+         "(PDF, DOCX, PNG…), one per extension."),
+    ]
+
+    def _section_icons(self) -> QWidget:
+        C = self.C
+        w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
+
+        lay.addWidget(self._heading("🖼️  Icon pack"))
+        self._icon_pack = self.history.settings.get("icon_pack", "default")
+        self._icon_pack_btns = {}
+        for pack, label, caption in self.ICON_PACKS:
+            row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
+            btn = QPushButton(label, row)
+            btn.setFixedWidth(165)
+            btn.clicked.connect(lambda _=False, p=pack: self._set_icon_pack(p))
+            rl.addWidget(btn)
+            cap = QLabel(caption, row); cap.setWordWrap(True)
+            cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+            rl.addWidget(cap, 1)
+            self._icon_pack_btns[pack] = btn
+            lay.addWidget(row)
+        self._refresh_icon_pack_buttons()
+        return w
+
+    def _refresh_icon_pack_buttons(self):
+        C = self.C
+        active   = _btn_style(C["accent"], C["accent_hover"])
+        inactive = _btn_style(C["bg_section"], C["accent"], C["text_dim"])
+        for pack, btn in self._icon_pack_btns.items():
+            btn.setStyleSheet(active if pack == self._icon_pack else inactive)
+
+    def _set_icon_pack(self, pack: str):
+        if pack == self._icon_pack:
+            return
+        self._icon_pack = pack
+        self.history.save_setting("icon_pack", pack)
+        self._refresh_icon_pack_buttons()
+        self._apply_to_app()   # open popup rebuilds with the new pack
 
     def _section_trigger(self) -> QWidget:
         C = self.C

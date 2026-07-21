@@ -122,12 +122,15 @@ ClipDrop/
 │
 ├── src/                        # All source code
 │   ├── main.py                 # App entry point
-│   ├── clipboard_watcher.py    # Monitors clipboard for new copies
+│   ├── clipboard_watcher.py    # Monitors clipboard, classifies copied content
 │   ├── history_manager.py      # Saves, loads, deduplicates, pins history
-│   ├── context_menu.py         # Injects into Windows right-click menu
-│   ├── dropdown_popup.py       # The cursor-position dropdown UI
+│   ├── profile_manager.py      # Named clipboard collections (profiles)
+│   ├── context_menu.py         # Right-click integration, triggers, hotkeys
+│   ├── dropdown_popup.py       # The cursor-position dropdown UI + icon engine
+│   ├── icon_packs.py           # Optional per-extension "Labeled" icon pack
+│   ├── snippet_window.py       # Blank scratchpad for new snippets
 │   ├── tray_icon.py            # System tray icon and menu
-│   └── settings_panel.py       # Simple settings window
+│   └── settings_panel.py       # Settings window + Shortcuts manager
 │
 ├── assets/                     # Icons, thumbnails, UI assets
 │
@@ -208,6 +211,7 @@ ClipDrop/
 - [x] Snippet scratchpad — type a note, save it straight into history
 - [x] Pause/resume capture, clear history, and profile cycling by hotkey
 - [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
+- [x] SVG icon system with selectable icon packs and per-extension detection
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -429,6 +433,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-20 | Visual overhaul — floating rounded cards with shadows, gradient surfaces, accent scrollbars, fluid hover motion, live in-place updates |
 | 2026-07-20 | Interactivity update — shortcuts manager with 5 rebindable global hotkeys, snippet scratchpad, Ctrl+click multi-selection with combined paste, drag & drop out, smarter overlay button positioning, profile-switch and context-menu stability fixes |
 | 2026-07-21 | Trigger modes — six ways to summon the popup (double right-click default, middle-click, side button, Ctrl+right-click, overlay button, hotkey-only); 3-tier context-menu detection (native / Chromium / UI Automation); instant overlay hide on menu close |
+| 2026-07-21 | Icon system rebuilt as SVG (crisp at every size), dedicated Python icon and smart type detection, plus an optional per-extension "Labeled documents" icon pack selectable in Settings |
 
 ---
 
@@ -760,4 +765,74 @@ with no flash at all.
 - **Instant hide:** when the overlay button mode is used, a WinEvent hook
   now hides the button the moment its native menu closes (submenu-safe
   via a nesting count), instead of lingering on the fallback timer.
+
+---
+
+### 🖼️ Icon System & Optional Icon Packs (July 2026)
+
+**Status:** ✅ Complete
+
+Every file-type icon was rebuilt as **SVG**, and icons became
+**selectable packs** so users can pick the look they prefer.
+
+#### Why the icons were rebuilt
+
+The original icons were drawn shape-by-shape with PIL drawing primitives
+— rectangles, ellipses, lines. That approach has a hard ceiling: PIL
+can't draw smooth bezier curves or gradients, so anything organic (a
+logo, a gear, a globe, a chain link) came out blocky no matter how much
+it was tuned. Supersampling helped the edges but couldn't fix the
+shapes themselves.
+
+The fix was to stop drawing and start **rendering**: icons are now
+authored as SVG and rasterised by Qt's own SVG engine (`QSvgRenderer`)
+at whatever size is needed. Curves, gradients and fine detail survive
+all the way down to the 16 px side-panel size. No new dependency —
+`QtSvg` ships with PyQt6.
+
+#### One constraint worth knowing
+
+**Qt's SVG renderer cannot draw `<text>` elements.** This was confirmed
+by testing, and it shapes the whole design:
+
+- Icons that are a coloured tile plus a letter (Word "W", Excel "X",
+  PowerPoint "P", PDF, the clipboard-text "Aa", the hex "#") keep using
+  **PIL**, which loads the bold TTF directly and renders crisp glyphs.
+- Everything else — the Python logo, gears, globe, chain link, folder,
+  waveform, terminal — is **pure SVG**.
+
+The result is a hybrid that uses each tool where it is strongest.
+
+#### Smart type detection
+
+File types resolve to icons through an extension map, with dedicated
+treatment where it matters:
+
+- **`.py` / `.pyw` / `.pyi`** get a real Python icon (the interlocking
+  two-tone logo) rather than the generic code icon, plus their own
+  Python-blue accent stripe.
+- **Hex colour codes** copied as text render a live swatch of the actual
+  colour, with the `#` in black or white depending on the colour's
+  luminance.
+- Unrecognised extensions fall back to a generic document icon — an icon
+  can never render blank, and a drawing error can never crash the app.
+
+#### Optional icon packs
+
+Settings → **Icon pack** now offers two complete sets:
+
+| Pack | Style | Granularity |
+|---|---|---|
+| **Default ClipDrop** | Colourful modern icons — Office letter tiles, Python logo, gears, globe | per file category |
+| **Labeled documents** | Document page + glyph + extension badge (PDF, DOCX, PNG…) | per file **extension** |
+
+The Labeled pack renders a distinct icon for every extension — PNG, JPG,
+GIF and SVG all differ, as do MP4 and MOV. Its badges are composited
+with PIL after the SVG shape is drawn, since Qt drops SVG text.
+
+Three types are **pinned to the Default icons in every pack**, by
+preference: **Python**, **shell/bash**, and **clipboard text**. Any
+extension a pack doesn't define falls back to the Default set, so no
+icon is ever missing. Switching packs applies immediately to an open
+popup.
 

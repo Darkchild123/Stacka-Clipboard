@@ -38,12 +38,13 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
     QVariantAnimation, QEasingCurve, pyqtSignal, QObject, pyqtSlot,
-    QThread, QEvent, QUrl, QMimeData,
+    QThread, QEvent, QUrl, QMimeData, QByteArray,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QFontMetrics,
     QPixmap, QImage, QCursor, QIcon, QPalette, QPolygonF, QDrag,
 )
+from PyQt6.QtSvg import QSvgRenderer
 
 # ── Colour themes ────────────────────────────────────────────────────────────
 
@@ -84,6 +85,7 @@ TYPE_COLOURS = {
     "file":   "#f59e0b",
     "folder": "#f59e0b",
     "code":   "#7c3aed",
+    "python": "#4B8BBE",
     "bash":   "#16a34a",
     "image":  "#0891b2",
 }
@@ -111,7 +113,9 @@ for _e in ['.zip','.rar','.7z','.tar','.gz','.bz2','.xz','.cab','.iso']:
     _FILE_TYPE_MAP[_e] = "zip"
 for _e in ['.html','.htm','.xhtml','.php','.asp','.aspx','.jsp']:
     _FILE_TYPE_MAP[_e] = "html"
-for _e in ['.py','.js','.ts','.jsx','.tsx','.java','.c','.cpp','.h','.cs',
+for _e in ['.py','.pyw','.pyi']:
+    _FILE_TYPE_MAP[_e] = "python"
+for _e in ['.js','.ts','.jsx','.tsx','.java','.c','.cpp','.h','.cs',
            '.go','.rs','.rb','.swift','.kt','.r','.sql','.css','.scss',
            '.vue','.svelte','.lua','.bat','.cmd','.sh','.bash','.ps1']:
     _FILE_TYPE_MAP[_e] = "code"
@@ -236,22 +240,54 @@ class _ScaledDraw:
         self._d.text(tuple(v * self._s for v in xy), s, font=font, **kw)
 
 
-def _icon_pixmap(icon_type: str, size: int = 32, colour_hint: str = None) -> QPixmap:
+# Types drawn as a coloured tile + a letter (Qt SVG can't render <text>, and
+# PIL loads the bold TTF directly so letters stay crisp). Everything else is
+# a pure vector icon rendered from ICON_SVGS via Qt's SVG engine.
+_LETTER_TYPES = {"text", "word", "excel", "ppt", "pdf", "hex"}
+
+# Icon packs (Settings -> Icon pack). "default" is the built-in set below;
+# "labeled" is the per-extension document pack in icon_packs.py. These three
+# TYPES always use the Default icons regardless of pack (user preference).
+_ACTIVE_PACK  = "default"
+_PINNED_TYPES = {"python", "bash", "text"}
+
+
+def set_icon_pack(name: str):
+    """Switch the active icon pack ('default' | 'labeled'). Cheap — the
+    icon cache is keyed by pack, so both packs coexist cached."""
+    global _ACTIVE_PACK
+    _ACTIVE_PACK = name or "default"
+
+
+def _icon_pixmap(icon_type: str, size: int = 32, colour_hint: str = None,
+                 ext: str = None) -> QPixmap:
     """Crash-proof, cached icon factory.
 
-    The hand-drawn icons below use fixed pixel coordinates tuned for
-    size=32; at smaller sizes some shapes can invert (x1 < x0) and PIL
-    raises ValueError. In PyQt6 an unhandled exception in a slot aborts
-    the entire app — a decorative icon must never be able to do that,
-    so any drawing error falls back to a plain colour badge.
+    Vector shapes render from SVG (crisp at any size, smooth curves and
+    gradients PIL can't do); letter tiles and the hex swatch are drawn
+    with PIL. An unhandled exception in a slot aborts the whole app, so
+    any drawing error falls back to a plain colour badge.
 
     colour_hint: for "hex" icons — the actual colour code the swatch shows.
+    ext: file extension — lets the Labeled pack pick a per-extension icon.
     """
-    key = (icon_type, size, colour_hint)
+    key = (_ACTIVE_PACK, icon_type, size, colour_hint, ext)
     if key in _ICON_CACHE:
         return _ICON_CACHE[key]
     try:
-        pm = _draw_icon_pixmap(icon_type, size, colour_hint)
+        pm = None
+        # Labeled pack: per-extension document icons, EXCEPT the pinned
+        # types which always use the Default (my) icons.
+        if (_ACTIVE_PACK == "labeled" and ext
+                and icon_type not in _PINNED_TYPES):
+            import icon_packs
+            pm = icon_packs.labeled_pixmap(ext, size)
+        if pm is None:                       # Default pack (or pack miss)
+            if icon_type in _LETTER_TYPES:
+                pm = _draw_letter_tile(icon_type, size, colour_hint)
+            else:
+                svg = ICON_SVGS.get(icon_type) or ICON_SVGS["default"]
+                pm = _svg_pixmap(svg, size)
         _ICON_CACHE[key] = pm
         return pm
     except Exception as e:
@@ -263,6 +299,18 @@ def _icon_pixmap(icon_type: str, size: int = 32, colour_hint: str = None) -> QPi
         data = img.tobytes("raw", "RGBA")
         qimg = QImage(data, size, size, QImage.Format.Format_RGBA8888)
         return QPixmap.fromImage(qimg)
+
+
+def _svg_pixmap(svg: str, size: int) -> QPixmap:
+    """Render an SVG string to a QPixmap at `size` px, antialiased."""
+    r = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    img = QImage(size, size, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r.render(p)
+    p.end()
+    return QPixmap.fromImage(img)
 
 
 _FONT_CACHE: dict = {}   # px → PIL font (or None if no TTF could be loaded)
@@ -285,222 +333,142 @@ def _bold_font(px: int):
     return font
 
 
-def _draw_icon_pixmap(icon_type: str, size: int = 32,
-                      colour_hint: str = None) -> QPixmap:
-    """Return a QPixmap for the given icon type, using PIL to draw it.
-    Rasters at _SS× resolution and downscales with LANCZOS for crispness;
-    branch code below works in logical `size` coordinates throughout."""
+def _gear_svg(cx, cy, r_out, r_in, r_hole, tw, th, fill, hole):
+    teeth = "".join(
+        f'<rect x="{cx-tw/2}" y="{cy-r_out}" width="{tw}" height="{th}" '
+        f'rx="2" fill="{fill}" transform="rotate({d} {cx} {cy})"/>'
+        for d in range(0, 360, 45))
+    return (f'{teeth}<circle cx="{cx}" cy="{cy}" r="{r_in}" fill="{fill}"/>'
+            f'<circle cx="{cx}" cy="{cy}" r="{r_hole}" fill="{hole}"/>')
+
+
+_TILE = '<rect x="8" y="8" width="112" height="112" rx="24" fill="{c}"/>'
+
+# Vector file-type icons, authored as SVG and rendered by Qt (QSvgRenderer).
+# Curves and gradients here are things PIL primitives can't draw cleanly —
+# this is why the icons are crisp at every size. Letter tiles (Office/PDF)
+# and the dynamic hex swatch are drawn separately in _draw_letter_tile.
+ICON_SVGS = {
+ "python": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+   '<defs><linearGradient id="pb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5A9FD4"/><stop offset="1" stop-color="#306998"/></linearGradient>'
+   '<linearGradient id="py" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFE873"/><stop offset="1" stop-color="#FFD43B"/></linearGradient></defs>'
+   '<path fill="url(#pb)" d="M63.4 16c-24 0-22 10.4-22 10.4l.03 10.8h22.4v3.2H32.6S16 38.6 16 63.9c0 25.2 14.5 24.3 14.5 24.3h7.9V77.1s-.43-14.5 14.3-14.5h22.2s13.8.22 13.8-13.3V29.6S102.5 16 63.4 16zM51 23.1a4 4 0 1 1 0 8.05 4 4 0 0 1 0-8.05z"/>'
+   '<path fill="url(#py)" d="M64.6 112c24 0 22-10.4 22-10.4l-.03-10.8H64.2v-3.2h31.3s16.6 1.9 16.6-23.5c0-25.2-14.5-24.3-14.5-24.3h-7.9V51s.43 14.5-14.3 14.5H57.2s-13.8-.22-13.8 13.3v22.6S25.5 112 64.6 112zM77 104.9a4 4 0 1 1 0-8.05 4 4 0 0 1 0 8.05z"/></svg>',
+
+ "txt": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+   '<path d="M30 10 h50 l24 24 v78 a6 6 0 0 1-6 6 H30 a6 6 0 0 1-6-6 V16 a6 6 0 0 1 6-6z" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2.5"/>'
+   '<path d="M80 10 v24 h24z" fill="#cbd5e1"/>'
+   '<g stroke="#64748b" stroke-width="6" stroke-linecap="round"><line x1="42" y1="56" x2="90" y2="56"/><line x1="42" y1="72" x2="90" y2="72"/><line x1="42" y1="88" x2="74" y2="88"/></g></svg>',
+
+ "url": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#0ea5e9") +
+   '<g fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round">'
+   '<path d="M58 70 a16 16 0 0 1 0-22 l11-11 a16 16 0 0 1 23 23 l-5 5"/>'
+   '<path d="M70 58 a16 16 0 0 1 0 22 l-11 11 a16 16 0 0 1-23-23 l5-5"/></g></svg>',
+
+ "image": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#0891b2") +
+   '<circle cx="46" cy="46" r="11" fill="#fde68a"/>'
+   '<path d="M20 104 L52 62 L74 90 L88 76 L108 104 Z" fill="#083344"/></svg>',
+
+ "video": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#dc2626") +
+   '<path d="M50 40 L92 64 L50 88 Z" fill="#fff"/></svg>',
+
+ "audio": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#7c3aed") +
+   '<g fill="#fff"><rect x="70" y="36" width="8" height="50" rx="2"/>'
+   '<path d="M78 36 q20 3 20 22 q-7-13-20-11 z"/>'
+   '<ellipse cx="62" cy="86" rx="14" ry="11" transform="rotate(-18 62 86)"/></g></svg>',
+
+ "dll": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#475569") +
+   _gear_svg(64, 64, 30, 22, 10, 12, 16, "#fff", "#475569") + '</svg>',
+
+ "exe": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#374151") +
+   '<rect x="28" y="38" width="72" height="54" rx="7" fill="#fff"/>'
+   '<circle cx="40" cy="49" r="3.2" fill="#ef4444"/><circle cx="51" cy="49" r="3.2" fill="#f59e0b"/><circle cx="62" cy="49" r="3.2" fill="#22c55e"/>'
+   '<path d="M52 60 L78 72 L52 84 Z" fill="#374151"/></svg>',
+
+ "zip": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#d97706") +
+   '<rect x="57" y="16" width="14" height="96" fill="#fbbf24"/>'
+   '<g fill="#78350f"><rect x="50" y="24" width="8" height="6"/><rect x="70" y="24" width="8" height="6"/>'
+   '<rect x="50" y="38" width="8" height="6"/><rect x="70" y="38" width="8" height="6"/>'
+   '<rect x="50" y="52" width="8" height="6"/><rect x="70" y="52" width="8" height="6"/></g>'
+   '<rect x="54" y="66" width="20" height="26" rx="5" fill="#fef3c7"/>'
+   '<rect x="61" y="72" width="6" height="12" rx="3" fill="#78350f"/></svg>',
+
+ "file": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+   '<path d="M34 12 h44 l26 26 v78 a6 6 0 0 1-6 6 H34 a6 6 0 0 1-6-6 V18 a6 6 0 0 1 6-6z" fill="#60a5fa"/>'
+   '<path d="M78 12 v26 h26z" fill="#2563eb"/></svg>',
+
+ "folder": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+   '<path d="M16 34 a8 8 0 0 1 8-8 h26 l12 12 h40 a8 8 0 0 1 8 8 v10 H16 z" fill="#d97706"/>'
+   '<path d="M16 46 h96 v50 a8 8 0 0 1-8 8 H24 a8 8 0 0 1-8-8 z" fill="#fbbf24"/></svg>',
+
+ "code": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#6d28d9") +
+   '<g fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">'
+   '<polyline points="46,48 28,64 46,80"/><polyline points="82,48 100,64 82,80"/></g>'
+   '<line x1="73" y1="42" x2="57" y2="86" stroke="#c4b5fd" stroke-width="8" stroke-linecap="round"/></svg>',
+
+ "bash": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
+   '<rect x="8" y="8" width="112" height="112" rx="18" fill="#0d1117"/>'
+   '<g fill="none" stroke="#4ade80" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">'
+   '<polyline points="36,50 54,66 36,82"/><line x1="64" y1="84" x2="92" y2="84"/></g></svg>',
+
+ "html": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#0ea5e9") +
+   '<g fill="none" stroke="#fff" stroke-width="6"><circle cx="64" cy="64" r="34"/>'
+   '<ellipse cx="64" cy="64" rx="15" ry="34"/><line x1="30" y1="64" x2="98" y2="64"/>'
+   '<line x1="39" y1="46" x2="89" y2="46" stroke-width="5"/><line x1="39" y1="82" x2="89" y2="82" stroke-width="5"/></g></svg>',
+}
+ICON_SVGS["default"] = ICON_SVGS["file"]
+
+# Letter tiles: type -> (tile colour, letter, font-size ratio)
+_LETTER_SPEC = {
+    "word":  ("#185ABD", "W",   0.58),
+    "excel": ("#107C41", "X",   0.60),
+    "ppt":   ("#C43E1C", "P",   0.60),
+    "pdf":   ("#C42B1C", "PDF", 0.30),
+}
+
+
+def _draw_letter_tile(icon_type: str, size: int, colour_hint: str = None) -> QPixmap:
+    """PIL-drawn coloured tile with a letter (Office/PDF), the clipboard-
+    text "Aa" symbol, or the dynamic hex-colour swatch. PIL loads the bold
+    TTF directly, so the glyphs stay crisp where Qt's SVG can't draw text."""
     from PIL import ImageDraw
     img = Image.new("RGBA", (size * _SS, size * _SS), (0, 0, 0, 0))
     d   = _ScaledDraw(ImageDraw.Draw(img), _SS)
 
     if icon_type == "hex":
-        # Hex colour code — a swatch of the ACTUAL colour with a "#".
         col = (colour_hint or "").strip()
-        if len(col) in (4, 5):    # #RGB / #RGBA → expand to #RRGGBB
+        if len(col) in (4, 5):      # #RGB / #RGBA -> #RRGGBB
             col = "#" + "".join(ch * 2 for ch in col[1:4])
-        elif len(col) == 9:       # #RRGGBBAA → drop alpha
+        elif len(col) == 9:         # #RRGGBBAA -> drop alpha
             col = col[:7]
         try:
             r, g, b = (int(col[i:i+2], 16) for i in (1, 3, 5))
         except (ValueError, IndexError):
-            r, g, b = 236, 72, 153   # generic pink swatch if unparsable
-            col = "#ec4899"
+            r, g, b, col = 236, 72, 153, "#ec4899"
         d.rounded_rectangle([1, 1, size-1, size-1], radius=size*0.16, fill=col)
         d.rounded_rectangle([1, 1, size-1, size-1], radius=size*0.16,
                             outline="#00000040", width=1)
-        # '#' glyph in black or white — whichever contrasts with the colour
-        lum = 0.299*r + 0.587*g + 0.114*b
-        fg  = "#1e1e1e" if lum > 140 else "white"
+        fg = "#1e1e1e" if 0.299*r + 0.587*g + 0.114*b > 140 else "white"
         f = _bold_font(max(6, int(size*0.55)))
         if f:
             d.text((size/2, size*0.52), "#", font=f, fill=fg, anchor="mm")
-        img = img.resize((size, size), Image.LANCZOS)
-        data = img.tobytes("raw", "RGBA")
-        qimg = QImage(data, size, size, QImage.Format.Format_RGBA8888)
-        return QPixmap.fromImage(qimg)
 
-    if icon_type == "text":
-        # Clipboard TEXT — copied CHARACTERS, not a file. Font symbol 🗚:
-        # big "A" + small "a". The .txt FILE icon is "txt" below — a
-        # paper sheet. Do not confuse the two.
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#4f46e5")
+    elif icon_type == "text":
+        # Copied CHARACTERS (not a .txt file): font symbol, big "A" + small "a"
+        d.rounded_rectangle([1, 1, size-1, size-1], radius=size*0.16, fill="#4f46e5")
         f_big   = _bold_font(max(6, int(size*0.62)))
         f_small = _bold_font(max(5, int(size*0.38)))
         if f_big and f_small:
             d.text((size*0.40, size*0.50), "A", font=f_big,   fill="white", anchor="mm")
             d.text((size*0.78, size*0.62), "a", font=f_small, fill="white", anchor="mm")
-        else:   # no TTF available — hand-drawn "A"
-            k = size / 32
-            d.line([16*k, 6*k, 8*k,  26*k], fill="white", width=max(1,int(3*k)))
-            d.line([16*k, 6*k, 24*k, 26*k], fill="white", width=max(1,int(3*k)))
-            d.line([11*k, 19*k, 21*k, 19*k], fill="white", width=max(1,int(3*k)))
-    elif icon_type == "txt":
-        # Text FILE (.txt/.rtf/…) — paper with stripes 📝
-        k    = size / 32
-        fold = max(2, int(7*k))
-        L, T = int(5*k), int(2*k)
-        R, B = size-int(5*k), size-int(2*k)
-        d.polygon([(L,T),(R-fold,T),(R,T+fold),(R,B),(L,B)], fill="#f8fafc")
-        d.polygon([(R-fold,T),(R,T+fold),(R-fold,T+fold)], fill="#cbd5e1")
-        x0, x1 = int(9*k), size-int(9*k)
-        lh = max(1, int(2*k))
-        for i in range(4):
-            y = int((10+5*i)*k)
-            d.rectangle([x0, y, x1, y+lh], fill="#64748b")
-    elif icon_type == "url":
-        # URL / web link — chain-link symbol 🔗: two interlocking rounded
-        # links drawn upright on a transparent layer, rotated 45°, then
-        # composited onto the tile (PIL can't rotate primitives directly).
-        k = size / 32
-        d.rounded_rectangle([1,1,size-1,size-1], radius=6*k, fill="#0ea5e9")
-        layer = Image.new("RGBA", (size * _SS, size * _SS), (0, 0, 0, 0))
-        ld = _ScaledDraw(ImageDraw.Draw(layer), _SS)
-        lw = max(2, int(3*k))
-        w2 = max(2, int(5*k))          # narrow links → elongated capsules
-        cx = size // 2
-        ld.rounded_rectangle([cx-w2, int(2*k),  cx+w2, int(17*k)],
-                             radius=w2, outline="white", width=lw)
-        ld.rounded_rectangle([cx-w2, int(13*k), cx+w2, int(28*k)],
-                             radius=w2, outline="white", width=lw)
-        layer = layer.rotate(45, resample=Image.BICUBIC,
-                             center=(size * _SS / 2, size * _SS / 2))
-        img.alpha_composite(layer)
-    elif icon_type == "image":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#0891b2")
-        d.ellipse([5,5,13,13], fill="#fef9c3")
-        d.polygon([(3,size-5),(size//2,12),(size-3,size-5)], fill="#164e63")
-    elif icon_type == "video":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#dc2626")
-        cx,cy = size//2, size//2
-        d.polygon([(cx-6,cy-8),(cx-6,cy+8),(cx+9,cy)], fill="white")
-    elif icon_type == "audio":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#7c3aed")
-        cx,cy = size//2,size//2+2
-        d.ellipse([cx-5,cy-5,cx+5,cy+5], fill="white")
-        d.line([cx,cy-5,cx,cy-11], fill="white", width=2)
-        d.line([cx,cy-11,cx+6,cy-9], fill="white", width=2)
-    elif icon_type == "excel":
-        # Office-style tile: Excel green, white bold "X"
-        d.rounded_rectangle([1,1,size-1,size-1], radius=int(size*0.16), fill="#107C41")
-        f = _bold_font(max(6, int(size*0.62)))
-        if f:
-            d.text((size/2, size*0.52), "X", font=f, fill="white", anchor="mm")
-        else:
-            d.line([6,8,size-6,size-6], fill="white", width=3)
-            d.line([size-6,8,6,size-6], fill="white", width=3)
-    elif icon_type == "word":
-        # Office-style tile: Word blue, white bold "W"
-        d.rounded_rectangle([1,1,size-1,size-1], radius=int(size*0.16), fill="#185ABD")
-        f = _bold_font(max(6, int(size*0.58)))
-        if f:
-            d.text((size/2, size*0.52), "W", font=f, fill="white", anchor="mm")
-        else:
-            for i,x2 in enumerate([size-5,size-8,size-12]):
-                if x2 > 4:
-                    d.rectangle([4,8+i*6,x2,10+i*6], fill="white")
-    elif icon_type == "ppt":
-        # Office-style tile: PowerPoint orange-red, white bold "P"
-        d.rounded_rectangle([1,1,size-1,size-1], radius=int(size*0.16), fill="#C43E1C")
-        f = _bold_font(max(6, int(size*0.62)))
-        if f:
-            d.text((size/2, size*0.52), "P", font=f, fill="white", anchor="mm")
-        else:
-            d.ellipse([5,5,size-5,size-5], fill="#fbbf24")
-    elif icon_type == "pdf":
-        # Red tile with white "PDF" lettering
-        d.rounded_rectangle([1,1,size-1,size-1], radius=int(size*0.16), fill="#dc2626")
-        f = _bold_font(max(5, int(size*0.30)))
-        if f:
-            d.text((size/2, size*0.52), "PDF", font=f, fill="white", anchor="mm")
-        else:
-            for i in range(3):
-                d.rectangle([6,10+i*6,size-6,11+i*6], fill="white")
-    elif icon_type == "dll":
-        # Library file — gear symbol ⚙ on a slate tile (k-scaled so it
-        # renders correctly at every size, unlike the fixed-coord exe gear)
-        import math
-        k = size / 32
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5*k, fill="#475569")
-        cx = cy = size / 2
-        Ro, Ri, Rh = 13*k, 10*k, 4*k
-        d.ellipse([cx-Ro,cy-Ro,cx+Ro,cy+Ro], fill="white")
-        d.ellipse([cx-Ri,cy-Ri,cx+Ri,cy+Ri], fill="#475569")
-        for deg in range(0, 360, 45):
-            a  = math.radians(deg)
-            tx = cx + (Ro-k)*math.cos(a)
-            ty = cy + (Ro-k)*math.sin(a)
-            r3 = 3*k
-            d.ellipse([tx-r3,ty-r3,tx+r3,ty+r3], fill="white")
-        d.ellipse([cx-Ri+k,cy-Ri+k,cx+Ri-k,cy+Ri-k], fill="white")
-        d.ellipse([cx-Rh,cy-Rh,cx+Rh,cy+Rh], fill="#475569")
-    elif icon_type == "exe":
-        import math
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#374151")
-        cx,cy = size//2,size//2
-        R_outer,R_inner,R_hole = 13,10,4
-        d.ellipse([cx-R_outer,cy-R_outer,cx+R_outer,cy+R_outer], fill="white")
-        d.ellipse([cx-R_inner,cy-R_inner,cx+R_inner,cy+R_inner], fill="#374151")
-        for deg in range(0,360,45):
-            a = math.radians(deg)
-            tx=int(cx+(R_outer-1)*math.cos(a)); ty=int(cy+(R_outer-1)*math.sin(a))
-            d.ellipse([tx-3,ty-3,tx+3,ty+3], fill="white")
-        d.ellipse([cx-R_inner+1,cy-R_inner+1,cx+R_inner-1,cy+R_inner-1], fill="white")
-        d.ellipse([cx-R_hole,cy-R_hole,cx+R_hole,cy+R_hole], fill="#374151")
-    elif icon_type == "zip":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#6b7280")
-        d.rounded_rectangle([4,5,size-4,13], radius=2, fill="#d1d5db")
-        d.rounded_rectangle([4,12,size-4,size-4], radius=2, fill="white")
-        cx=size//2
-        d.rectangle([cx-2,5,cx+2,size-4], fill="#9ca3af")
-        for zy in range(7,size-5,4):
-            d.rectangle([cx-4,zy,cx-2,zy+2], fill="#d1d5db")
-            d.rectangle([cx+2,zy+2,cx+4,zy+4], fill="#d1d5db")
-    elif icon_type == "file":
-        fold=9
-        d.polygon([(4,2),(size-fold-2,2),(size-3,fold+1),(size-3,size-2),(4,size-2)], fill="#f59e0b")
-        d.polygon([(size-fold-2,2),(size-3,fold+1),(size-fold-2,fold+1)], fill="#b45309")
-    elif icon_type == "folder":
-        d.rounded_rectangle([2,8,14,14], radius=2, fill="#fbbf24")
-        d.rounded_rectangle([2,12,size-2,size-3], radius=3, fill="#f59e0b")
-        d.rounded_rectangle([2,12,size-2,17], radius=3, fill="#fde68a")
-    elif icon_type == "code":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=5, fill="#6d28d9")
-        cx,cy = size//2,size//2
-        d.line([cx-9,cy-5,cx-14,cy], fill="white", width=2)
-        d.line([cx-14,cy,cx-9,cy+5], fill="white", width=2)
-        d.line([cx-2,cy+7,cx+2,cy-7], fill="#a78bfa", width=2)
-        d.line([cx+9,cy-5,cx+14,cy], fill="white", width=2)
-        d.line([cx+14,cy,cx+9,cy+5], fill="white", width=2)
-    elif icon_type == "bash":
-        d.rounded_rectangle([1,1,size-1,size-1], radius=4, fill="#0d1117")
-        d.rounded_rectangle([1,1,size-1,9], radius=4, fill="#161b22")
-        d.ellipse([4,3,8,7], fill="#ff5f56")
-        d.ellipse([10,3,14,7], fill="#febc2e")
-        d.ellipse([16,3,20,7], fill="#28c840")
-        cx=6; cy=size//2+4
-        d.line([cx,cy-4,cx+5,cy], fill="#4ade80", width=2)
-        d.line([cx+5,cy,cx,cy+4], fill="#4ade80", width=2)
-        d.rectangle([cx+8,cy+2,cx+18,cy+4], fill="#4ade80")
-    elif icon_type == "html":
-        # HTML — globe symbol 🌐: sphere with meridians and parallels
-        k  = size / 32
-        cx = cy = size / 2
-        r  = size/2 - 2*k
-        lw = max(1, int(2*k))
-        d.ellipse([cx-r, cy-r, cx+r, cy+r], fill="#0ea5e9")
-        d.ellipse([cx-r, cy-r, cx+r, cy+r], outline="white", width=lw)
-        d.ellipse([cx-r*0.45, cy-r, cx+r*0.45, cy+r], outline="white", width=lw)
-        d.line([cx-r, cy, cx+r, cy], fill="white", width=lw)          # equator
-        yy, xx = r*0.55, r*0.83   # chord half-width = √(1−0.55²)·r
-        d.line([cx-xx, cy-yy, cx+xx, cy-yy], fill="white", width=lw)  # parallels
-        d.line([cx-xx, cy+yy, cx+xx, cy+yy], fill="white", width=lw)
-    else:
-        d.rounded_rectangle([2,2,size-2,size-2], radius=4, fill="#0891b2")
-        d.ellipse([7,6,14,13], fill="#fef9c3")
-        d.polygon([(4,size-6),(size//2,14),(size-4,size-6)], fill="#164e63")
 
-    # Downscale from the supersampled raster, then convert to QPixmap
+    else:
+        col, letter, ratio = _LETTER_SPEC[icon_type]
+        d.rounded_rectangle([1, 1, size-1, size-1], radius=size*0.16, fill=col)
+        f = _bold_font(max(6, int(size*ratio)))
+        if f:
+            d.text((size/2, size*0.52), letter, font=f, fill="white", anchor="mm")
+
     img = img.resize((size, size), Image.LANCZOS)
     data = img.tobytes("raw", "RGBA")
     qimg = QImage(data, size, size, QImage.Format.Format_RGBA8888)
@@ -742,20 +710,23 @@ class ItemRowWidget(QWidget):
             except Exception:
                 pass
         # Determine icon type for files
+        ext = None
         if itype == "file":
             files = item.get("content",[])
             if isinstance(files, list) and files:
                 ext = os.path.splitext(files[0])[1].lower()
                 icon_type = _FILE_TYPE_MAP.get(ext, "file")
                 if len(files) > 1:
-                    icon_type = "file"
+                    icon_type = "file"   # multi-file entry: generic icon
+                    ext = None
                 elif os.path.isdir(files[0]):
                     icon_type = "folder"
+                    ext = None
             else:
                 icon_type = "file"
         else:
             icon_type = itype or "file"
-        label.setPixmap(_icon_pixmap(icon_type, THUMB_SIZE))
+        label.setPixmap(_icon_pixmap(icon_type, THUMB_SIZE, ext=ext))
 
     # ── Background ───────────────────────────────────────────────────────────
 
@@ -1430,12 +1401,13 @@ class SidePanelWidget(QWidget):
             qi       = QListWidgetItem(f"  {basename}")
             qi.setData(Qt.ItemDataRole.UserRole, fp)
             qi.setData(_PIN_ROLE, fp in pinned)
+            row_ext = None if itype == "folder" else ext
             if itype == "folder":
                 try:
                     qi.setData(_COUNT_ROLE, len(os.listdir(fp)))
                 except OSError:
                     pass   # unreadable folder — no count shown
-            qi.setIcon(QIcon(_icon_pixmap(itype, 16)))
+            qi.setIcon(QIcon(_icon_pixmap(itype, 16, ext=row_ext)))
             self._list.addItem(qi)
 
     def _row_of(self, fp: str) -> int:
@@ -1698,10 +1670,12 @@ class DropdownPopup(QObject):
         # stale panel from the previous position.
         self._close_windows(keep_panel=keep_panel)
 
-        # Theme + opacity from settings
+        # Theme + opacity + icon pack from settings
         theme = self.history.settings.get("theme", "dark") if self.history else "dark"
         self._colours = DARK if theme == "dark" else LIGHT
         self._opacity = self.history.settings.get("transparency", 1.0) if self.history else 1.0
+        if self.history:
+            set_icon_pack(self.history.settings.get("icon_pack", "default"))
         C = self._colours
 
         # Get items
