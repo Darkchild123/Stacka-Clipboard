@@ -61,7 +61,7 @@ ClipDrop solves this by:
 | 🔁 Smart Deduplication | Copying the same item again moves it to the top — no duplicates |
 | 💾 Persistent History | History is saved to disk and survives restarts |
 | 📌 Pin Items | Pin important items so they stay at the top and are never auto-removed |
-| 🗑️ Delete Items | Remove any individual item from your history |
+| 🗑️ Remove Items | Remove any item from a list (single or multi-selected) via right-click or the row's ✕ |
 | 🔢 User-Defined History Size | You choose how many items to keep in Settings |
 | ⚙️ System Tray Icon | App runs in background; access Settings or Quit from the tray |
 | 🧹 Clear All History | One-click clear from Settings or tray menu |
@@ -439,6 +439,10 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-21 | Adjustable sizing — three sliders (main window, row size, side list) scaling the UI 60–120% in fixed 10% steps, with dependent values derived automatically |
 | 2026-07-21 | Open items from the list — right-click Open / Open containing folder for files, folders and links, with existence checking moved off the UI thread so dead network paths can't freeze the app |
 | 2026-07-22 | Customisation pass — cursor positioning fixed on scaled displays, hover bulge + selectable hover colours + font-size control, side-list-rows slider, shortcut unassign, and create-new-profile in every send-to menu and the header |
+| 2026-07-22 | Drag-to-resize main window — resize the popup by its borders (visible row count follows height), replacing the Main-window sizing slider; DPI-scaled cursor positioning fixed |
+| 2026-07-22 | Remove in every right-click menu (honouring multi-selection); folder-content rows gain "Remove from list" (hides the row without deleting the file from disk); "Delete" wording changed to "Remove" throughout |
+| 2026-07-22 | Context menus auto-dismiss on hover-out (main list and side lists); right-click no longer changes the selection; the overlay button is suppressed while the app popup is open |
+| 2026-07-22 | Independent profiles — sending a clip to a profile stores its own copy, so trimming, deleting or reordering in one list never affects another; each profile trims to the shared size limit independently, with automatic migration of existing profiles |
 
 ---
 
@@ -955,7 +959,7 @@ shutdown.
 
 ### 🎛️ Customisation & UX Refinements (July 2026)
 
-**Status:** ✅ Complete (window drag-resize still to come)
+**Status:** ✅ Complete
 
 #### Cursor positioning on scaled displays
 
@@ -983,8 +987,9 @@ same coordinate system and always agree, at any scaling.
 
 The side-list *size* slider was replaced with a **Side list rows** slider
 (1–20) — how many rows show before it scrolls — which is the dimension
-that actually matters for a hover flyout. Row size and main-window sliders
-remain (the main-window one until window drag-resize replaces it).
+that actually matters for a hover flyout. The Row size slider remains; the
+Main-window slider was later replaced by dragging the window's borders (see
+*Resizable Window* below).
 
 #### Shortcuts — unassign
 
@@ -1000,4 +1005,79 @@ empty profile, switches to it) and a **➕ New profile…** entry in every
 "Send to profile" menu: the main list, the file side panel, and the nested
 folder panels. From a Send-to menu it prompts for a name, creates the
 profile, and drops the clip straight into it.
+
+---
+
+### 🪟 Resizable Window, Cleaner Removal & Steadier Menus (July 2026)
+
+**Status:** ✅ Complete
+
+#### Drag-to-resize main window
+
+The popup is now **resized by dragging its borders**, and the number of
+visible rows follows the window height. This replaces the old *Main window*
+sizing slider, and the window remembers its size between sessions. The grip is
+the transparent shadow margin around the card; the resize is handled by hand
+rather than with a native frame, so it never disturbs the translucent,
+no-activate window internals the popup relies on. On scaled displays
+(125% / 150%) the process now claims Per-Monitor-v2 DPI awareness at startup,
+so the popup lands exactly at the cursor and the resize maths stay correct.
+
+#### "Remove" everywhere, and folder rows you can hide
+
+Every right-click menu now has a **Remove** action, and it honours a
+`Ctrl+click` multi-selection — right-click one of several selected rows to
+remove them all at once. The wording was changed from *Delete* to **Remove**
+throughout, since these actions take an item out of a list, not off the disk.
+
+Folder contents shown in a side list (a copied folder's files, or a hovered
+folder's nested panel) get **Remove from list** instead: it hides that row for
+that clip and never touches the real file on disk. The hide is remembered, so
+the row stays gone when the folder is reopened.
+
+#### Menus that behave
+
+- **Context menus auto-dismiss on hover-out.** Both the main list and the side
+  lists close their right-click menu when the cursor leaves it (with a short
+  grace so submenus stay reachable), instead of lingering until you click
+  elsewhere. This is independent of the window's click / hover close-mode
+  setting — that setting governs the main window; side lists and menus always
+  hover-close.
+- **Right-click no longer selects a row.** Right-clicking a file in a side list
+  used to highlight the row and show "1 selected", exactly like a `Ctrl+click`.
+  The menu now opens without ever changing the selection.
+- **Overlay button steps aside.** The "Paste from ClipDrop" overlay no longer
+  appears while the app popup is already open, so it can't interfere with it.
+
+---
+
+### 🗂️ Independent Profiles — Export Model (July 2026)
+
+**Status:** ✅ Complete
+
+Profiles are now **fully independent collections**. Previously each profile was
+a set of references into one shared history pool, which coupled their
+lifecycles: when the size limit trimmed the shared pool an item could vanish
+from a named profile too, and deleting or reordering in one place could ripple
+into another.
+
+Sending a clip to a profile now stores that profile's **own copy** of it:
+
+- An item **ageing out of General** (or any list) via the size limit — or being
+  deleted or reordered there — **never affects the same item held by another
+  profile**. Each list owns its items.
+- Each profile **trims its own copies** to the shared size limit,
+  independently; changing the limit in Settings re-trims every profile.
+- **Images** are copied per profile, so removing one profile's image never
+  disturbs another's or General's.
+- Existing profiles are **migrated automatically** on first launch — their old
+  references become owned copies (a backup of the profiles file is kept).
+
+General stays the live clipboard capture; named profiles are the curated,
+self-contained collections you export into.
+
+An item's position also decides when it ages out: new copies enter at the top,
+and the size limit removes the **bottom-most** unpinned item first — so pushing
+a row down with the ↓ button deliberately moves it to the front of the age-out
+queue.
 
