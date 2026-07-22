@@ -192,6 +192,44 @@ def _activate_for_menu(widget):
         pass
 
 
+def _cursor_over_menu(menu) -> bool:
+    """True while the cursor is over the menu OR any of its open submenus.
+
+    Drives hover-out auto-dismiss for the side-list context menu: a QMenu
+    normally stays up until an item is chosen or it's clicked away, which on
+    the popup's no-activate windows is unreliable and can leave the menu
+    stuck on screen. Submenus (e.g. "Send to profile") are children of the
+    menu, so they're covered too — moving from the menu into its submenu
+    still counts as "over the menu"."""
+    try:
+        pos = QCursor.pos()
+        for m in [menu] + menu.findChildren(QMenu):
+            if m.isVisible() and m.frameGeometry().contains(pos):
+                return True
+    except RuntimeError:
+        pass
+    return False
+
+
+def _menu_hover_should_close(over: bool, st: dict) -> bool:
+    """One tick of the side-list context-menu hover-out watchdog.
+
+    `st` carries {'outside','seen','age'} across ticks (mutated in place).
+    Returns True when the menu should close: the cursor LEFT it after having
+    been on it (a ~3-tick grace so a submenu is reachable), or the menu was
+    opened but NEVER touched (a ~8-tick settle, e.g. it popped up off-cursor
+    near a screen edge and was abandoned)."""
+    st["age"] += 1
+    if over:
+        st["seen"] = True
+        st["outside"] = 0
+        return False
+    st["outside"] += 1
+    left  = st["seen"] and st["outside"] >= 3
+    stale = (not st["seen"]) and st["age"] >= 8
+    return left or stale
+
+
 def _to_logical(x: int, y: int):
     """Convert PHYSICAL screen pixels (from the mouse hook / pyautogui, both
     DPI-aware) to Qt's LOGICAL pixels used by move()/geometry().
@@ -1217,6 +1255,7 @@ class SidePanelWidget(QWidget):
         self._folder       = None           # folder this panel lists (nested only)
         self._title        = title
         self._menu_open    = False          # suppress leave-close while a menu shows
+        self._active_menu  = None           # open context menu (for teardown)
         self._last_btn     = Qt.MouseButton.LeftButton
         self._sel_at_press = []             # selection snapshot (see eventFilter)
         self._close_timer  = QTimer(self)
@@ -1442,6 +1481,17 @@ class SidePanelWidget(QWidget):
         super().leaveEvent(e)
 
     def closeEvent(self, e):
+        # A context menu open on this panel must die WITH the panel — else it
+        # orphans on screen after the panel (or the whole app) closes. The
+        # watchdog also handles this, but closing here is immediate and covers
+        # the case where the panel is closed directly (not via a hide-check).
+        m = getattr(self, "_active_menu", None)
+        if m is not None:
+            try:
+                m.close()
+            except RuntimeError:
+                pass
+            self._active_menu = None
         # Closing a panel closes its nested children with it, and hands
         # the close countdown back to the parent (harmless if the parent
         # itself is the one closing us).
@@ -1536,8 +1586,10 @@ class SidePanelWidget(QWidget):
 
         self._menu_open = True
         self.cancel_close_timer()
+        watch = None
         try:
             menu = QMenu(self)
+            self._active_menu = menu
             menu.setStyleSheet(f"""
                 QMenu {{ background:{C['bg_item']}; color:{C['text']};
                          border:1px solid {C['border']}; font-family:'Segoe UI'; }}
@@ -1596,9 +1648,38 @@ class SidePanelWidget(QWidget):
                        if len(targets) > 1 else "Remove from list")
                 menu.addAction(lbl).setData(("hide", tuple(targets), None))
 
+            # Watchdog — fires INSIDE menu.exec()'s nested loop. A context
+            # menu doesn't dismiss on hover-out, and click-away is unreliable
+            # on the popup's no-activate windows, so it can sit there stuck;
+            # and if the panel or popup is torn down under it, it orphans on
+            # screen. This closes the menu when the cursor leaves it (after a
+            # short grace so submenus stay reachable), when it's been opened
+            # but never touched, or when the panel/popup goes away.
+            watch = QTimer(menu)
+            st = {"outside": 0, "seen": False, "age": 0}
+
+            def _watch_tick():
+                try:
+                    if not menu.isVisible():
+                        watch.stop(); return
+                    popup = self._parent_popup
+                    if (not self.isVisible() or
+                            (popup is not None and not popup.isVisible())):
+                        menu.close(); watch.stop(); return   # torn down → no orphan
+                    if _menu_hover_should_close(_cursor_over_menu(menu), st):
+                        menu.close(); watch.stop()
+                except RuntimeError:
+                    watch.stop()
+
+            watch.timeout.connect(_watch_tick)
+            watch.start(120)
+
             _activate_for_menu(self)   # menu needs an ACTIVE owner to grab
             chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
         finally:
+            if watch is not None:
+                watch.stop()
+            self._active_menu = None
             self._menu_open = False
             # Re-arm the leave-close only if the cursor has left the panel
             if not self.rect().contains(self.mapFromGlobal(QCursor.pos())):

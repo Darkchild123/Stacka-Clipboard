@@ -131,6 +131,21 @@ class TrayIcon:
 
     def _quit(self):
         print("Quitting ClipDrop...")
+        # Dismiss any open context menu + the popup/side panels FIRST, so
+        # nothing is left orphaned on screen after the event loop stops.
+        try:
+            pw = QApplication.activePopupWidget()
+            while pw is not None:
+                pw.close()
+                nxt = QApplication.activePopupWidget()
+                if nxt is pw:
+                    break            # not going away — avoid a spin
+                pw = nxt
+            popup = QApplication.instance().property("clipdrop_popup")
+            if popup is not None:
+                popup._do_hide()
+        except Exception:
+            pass
         if self._tray:
             self._tray.hide()
         QApplication.quit()
