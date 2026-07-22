@@ -846,6 +846,8 @@ class ItemRowWidget(QWidget):
             if text == "pin":
                 btn.setPixmap(_pin_pixmap(colour, filled=pinned))
                 btn.setToolTip("Unpin" if pinned else "Pin")
+            elif text == "✕":
+                btn.setToolTip("Remove")
             btn.clicked_signal.connect(lambda _=None, s=sig, i=self.item: s.emit(i))
             row.addWidget(btn)
 
@@ -1339,6 +1341,14 @@ class SidePanelWidget(QWidget):
                     self._list.item(i).data(Qt.ItemDataRole.UserRole)
                     for i in range(self._list.count())
                     if self._list.item(i).isSelected()]
+            elif ev.button() == Qt.MouseButton.RightButton:
+                # Same snapshot for the right-click menu: capture the multi-
+                # selection BEFORE Qt (may) collapse it, so a right-click
+                # Delete can target every selected file.
+                self._sel_at_press = [
+                    self._list.item(i).data(Qt.ItemDataRole.UserRole)
+                    for i in range(self._list.count())
+                    if self._list.item(i).isSelected()]
         return False   # never consume — just observe
 
     def _on_selection_changed(self):
@@ -1478,6 +1488,11 @@ class SidePanelWidget(QWidget):
         except OSError:
             return   # unreadable / vanished folder — nothing to reveal
         files = [os.path.join(folder, n) for n in names]
+        # Drop rows the user hid via "Remove from list" (persisted per-entry,
+        # never deleted from disk) so they stay gone when the folder reopens.
+        hidden = self.item.get("hidden_files") or []
+        if hidden:
+            files = [f for f in files if f not in hidden]
         if not files:
             return
 
@@ -1553,11 +1568,33 @@ class SidePanelWidget(QWidget):
 
             pin_act = menu.addAction("Unpin" if self._file_is_pinned(fp) else "Pin")
             pin_act.setData(("pin", None, None))
-            # Delete only applies to files that ARE entries of the clipboard
-            # item — not to files inside a hovered folder (nested panel).
-            if fp in (self.item.get("content") or []):
-                del_act = menu.addAction("Delete file")
-                del_act.setData(("delete", None, None))
+            # Two kinds of row need two kinds of Remove:
+            #   • a row that IS an entry of the clip (multi-file content) —
+            #     "Remove file" drops it from the clip entry (not from disk).
+            #   • a row read from DISK (a folder's contents — shown either in a
+            #     hovered nested panel OR the top-level panel of a single-folder
+            #     clip) — "Remove from list" hides it from this entry's folder
+            #     view (persisted on the entry, like pinned_files). It NEVER
+            #     touches the file on disk, because a real delete would.
+            content = self.item.get("content") or []
+            if fp in content:
+                # Honour the multi-selection: right-clicking a selected file
+                # removes every selected file; right-clicking outside it (or
+                # with just one selected) removes only the clicked file.
+                targets = [p for p in self._sel_at_press if p in content]
+                if not (fp in targets and len(targets) > 1):
+                    targets = [fp]
+                lbl = (f"Remove {len(targets)} files"
+                       if len(targets) > 1 else "Remove file")
+                menu.addAction(lbl).setData(("delete", tuple(targets), None))
+            else:
+                # Disk-read child row (nested panel or single-folder side list).
+                targets = [p for p in self._sel_at_press if p in self.files]
+                if not (fp in targets and len(targets) > 1):
+                    targets = [fp]
+                lbl = (f"Remove {len(targets)} from list"
+                       if len(targets) > 1 else "Remove from list")
+                menu.addAction(lbl).setData(("hide", tuple(targets), None))
 
             _activate_for_menu(self)   # menu needs an ACTIVE owner to grab
             chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
@@ -1581,7 +1618,9 @@ class SidePanelWidget(QWidget):
         elif action == "pin":
             self._toggle_file_pin(fp)
         elif action == "delete":
-            self._delete_file(fp)
+            self._delete_files(list(prof_id) if prof_id else [fp])
+        elif action == "hide":
+            self._hide_files(list(prof_id) if prof_id else [fp])
 
     def _new_profile_with_file(self, fp: str):
         """Side-list 'New profile…': prompt for a name, create it, and add
@@ -1678,23 +1717,66 @@ class SidePanelWidget(QWidget):
         ctrl._show_toast(f'Sent "{os.path.basename(fp)}" to "{profile_name}"')
         ctrl._refresh()
 
-    def _delete_file(self, fp: str):
+    def _delete_files(self, fps):
+        """Delete one or more content files from this entry, dropping their
+        rows in place, then refresh the main list once. Stops and closes the
+        panel if the whole entry disappears (last file removed)."""
         ctrl = self.controller
-        # Row index in display order, BEFORE any mutation (self.files may be
-        # the same list object item["content"] that the data call mutates).
-        idx = self._row_of(fp)
-        pf = self.item.get("pinned_files", [])
-        if fp in pf:
-            pf.remove(fp)   # persisted by remove_file_from_item's save
-        still_exists = ctrl.history.remove_file_from_item(self.item["id"], fp)
-        if fp in self.files:
-            self.files.remove(fp)
-        if idx >= 0:
-            self._list.takeItem(idx)
-        self._hdr.setText(f"  {len(self.files)} files")
-        if not still_exists or not self.files:
-            self.close()   # whole entry gone — nothing left to show
+        if ctrl is None:
+            return
+        gone = False
+        for fp in fps:
+            # Row index in display order, looked up per file AFTER earlier
+            # removals — takeItem() shifts every row below it up by one, and
+            # self.files may be the same list object item["content"] that the
+            # data call mutates.
+            idx = self._row_of(fp)
+            pf = self.item.get("pinned_files", [])
+            if fp in pf:
+                pf.remove(fp)   # persisted by remove_file_from_item's save
+            still_exists = ctrl.history.remove_file_from_item(self.item["id"], fp)
+            if fp in self.files:
+                self.files.remove(fp)
+            if idx >= 0:
+                self._list.takeItem(idx)
+            if not still_exists or not self.files:
+                gone = True
+                break   # whole entry gone — nothing left to show
+        self._hdr.setText(self._hdr_text())
+        if gone:
+            self.close()
         ctrl._refresh()
+
+    def _delete_file(self, fp: str):
+        self._delete_files([fp])
+
+    def _hdr_text(self) -> str:
+        """Header label — nested panels keep their folder title, top-level
+        panels just show the count."""
+        n = len(self.files)
+        return f"  {self._title} — {n} files" if self._title else f"  {n} files"
+
+    def _hide_files(self, fps):
+        """Hide folder-child rows from this entry's nested view WITHOUT
+        touching disk. The hidden paths are stored on the clip entry (like
+        pinned_files) so they stay hidden when the folder is re-opened, and
+        vanish when the entry itself is gone."""
+        hidden = self.item.setdefault("hidden_files", [])
+        changed = False
+        for fp in fps:
+            if fp not in hidden:
+                hidden.append(fp)
+                changed = True
+            idx = self._row_of(fp)
+            if idx >= 0:
+                self._list.takeItem(idx)
+            if fp in self.files:
+                self.files.remove(fp)
+        if changed and self.controller is not None:
+            self.controller.history._save_history()
+        self._hdr.setText(self._hdr_text())
+        if not self.files:
+            self.close()   # everything in this folder view is hidden now
 
 
 # ── Main popup window ─────────────────────────────────────────────────────────
@@ -2345,9 +2427,8 @@ class DropdownPopup(QObject):
             if is_multi or is_folder:
                 if is_folder:
                     try:
-                        panel_files = sorted(
-                            [os.path.join(files[0], n) for n in os.listdir(files[0])],
-                            key=lambda p: (not os.path.isdir(p), os.path.basename(p).lower()))
+                        panel_files = self._folder_panel_files(
+                            files[0], item.get("hidden_files"))
                     except Exception:
                         panel_files = files
                 else:
@@ -2377,6 +2458,18 @@ class DropdownPopup(QObject):
             if self._side_panel:
                 self._side_panel.arm_close_timer()
         return leave
+
+    @staticmethod
+    def _folder_panel_files(folder: str, hidden=None) -> list:
+        """On-disk children of a folder (dirs first, then case-insensitive),
+        minus any paths the user hid via "Remove from list". Kept in one place
+        so the top-level single-folder side list and the nested folder panel
+        filter hides identically."""
+        kids = sorted(
+            [os.path.join(folder, n) for n in os.listdir(folder)],
+            key=lambda p: (not os.path.isdir(p), os.path.basename(p).lower()))
+        hidden = hidden or []
+        return [f for f in kids if f not in hidden] if hidden else kids
 
     def _open_side_panel(self, row: QWidget, item: dict, files: list):
         if self._side_panel:
@@ -2600,6 +2693,15 @@ class DropdownPopup(QObject):
                 menu.addAction(prof["name"]).setData(("send", prof["id"]))
             menu.addAction("➕  New profile…").setData(("newprofile", None))
 
+        # ── Remove ── right-clicking a row inside a Ctrl+click multi-selection
+        # removes every selected row; otherwise it removes just this one.
+        sel = self._selected_ids
+        multi = item["id"] in sel and len(sel) > 1
+        if not menu.isEmpty():
+            menu.addSeparator()
+        menu.addAction(f"Remove {len(sel)} items" if multi else "Remove") \
+            .setData(("delete", None))
+
         if menu.isEmpty():
             return
         _activate_for_menu(self._popup)   # menu needs an ACTIVE owner to grab
@@ -2621,6 +2723,11 @@ class DropdownPopup(QObject):
             self._send_item_to_profile(item, value, chosen.text())
         elif action == "newprofile":
             self._new_profile_with_item(item)
+        elif action == "delete":
+            if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
+                self._delete_selected()
+            else:
+                self._delete_item(item)
 
     def _new_profile_with_item(self, item: dict):
         """Prompt for a name, create the profile, and add this clip to it."""
@@ -2678,7 +2785,9 @@ class DropdownPopup(QObject):
             self.history.toggle_pin(item["id"])
         self._refresh()
 
-    def _delete_item(self, item: dict):
+    def _delete_one(self, item: dict):
+        """Remove a single item from the active view WITHOUT refreshing, so a
+        multi-delete can drop every selected row and repaint just once."""
         if self.profiles:
             active = self.profiles.get_active_profile()
             if active["id"] == "general":
@@ -2700,6 +2809,20 @@ class DropdownPopup(QObject):
                 self.profiles.remove_item_from_profile(item["id"], active["id"])
         else:
             self.history.delete_item(item["id"])
+
+    def _delete_item(self, item: dict):
+        """Delete one row — the ✕ button and the single-row right-click menu."""
+        self._delete_one(item)
+        self._refresh()
+
+    def _delete_selected(self):
+        """Delete every Ctrl+click-selected row in one pass, then refresh."""
+        ids = set(self._selected_ids)
+        if not ids:
+            return
+        for it in [i for i in self._items_all if i["id"] in ids]:
+            self._delete_one(it)
+        self._selected_ids.clear()
         self._refresh()
 
     def _move_up(self, item: dict):
