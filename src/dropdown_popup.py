@@ -555,25 +555,26 @@ def _content_count(item: dict):
 
 
 # ── Sizing ────────────────────────────────────────────────────────────────────
-# Base (100%) metrics. The Sizing sliders in Settings scale these in fixed
-# 10% steps between 60% and 120% — deliberately coarse so no setting can
-# produce a broken layout. apply_scales() recomputes the live values below
-# before each popup build; widgets read the live values at construction.
+# The main window is drag-resizable (its width/height persist to settings);
+# row height and font are percent sliders. apply_scales() recomputes the row
+# metrics before each popup build; set_window_size() sets the persisted
+# window size. Widgets read the live values at construction.
 
-_BASE_POPUP_WIDTH = 420    # main window width
-_BASE_ITEM_HEIGHT = 76     # main list row height
-_BASE_THUMB_SIZE  = 36     # row icon / thumbnail
-_BASE_PREVIEW_W   = 240    # preview text wrap width (follows window width)
-_BASE_LIST_MAX_H  = 480    # list height cap (follows row height)
-_BASE_PANEL_W     = 280    # side list width
-_BASE_PANEL_ROW_H = 26     # side list row height
+_BASE_POPUP_WIDTH  = 420   # default main window width
+_BASE_POPUP_HEIGHT = 560   # default main window height
+_BASE_ITEM_HEIGHT  = 76    # main list row height
+_BASE_THUMB_SIZE   = 36    # row icon / thumbnail
+_BASE_PANEL_W      = 280   # side list width
+_BASE_PANEL_ROW_H  = 26    # side list row height
 
-POPUP_WIDTH = _BASE_POPUP_WIDTH
-ITEM_HEIGHT = _BASE_ITEM_HEIGHT
-THUMB_SIZE  = _BASE_THUMB_SIZE
-PREVIEW_W   = _BASE_PREVIEW_W
-LIST_MAX_H  = _BASE_LIST_MAX_H
-PADDING     = 10
+MIN_POPUP_W = 300          # smallest the user can drag the window
+MIN_POPUP_H = 200
+
+POPUP_WIDTH  = _BASE_POPUP_WIDTH    # live window size (drag / settings)
+POPUP_HEIGHT = _BASE_POPUP_HEIGHT
+ITEM_HEIGHT  = _BASE_ITEM_HEIGHT
+THUMB_SIZE   = _BASE_THUMB_SIZE
+PADDING      = 10
 
 SCALE_MIN, SCALE_MAX, SCALE_STEP = 60, 120, 10
 
@@ -588,25 +589,62 @@ def clamp_scale(pct) -> int:
     return int(round(pct / SCALE_STEP) * SCALE_STEP)
 
 
-def apply_scales(popup_pct=100, row_pct=100):
-    """Apply the Settings sizing sliders. Values that must move together
-    (icon with row height, text wrap with window width, list cap with row
-    height) are derived here rather than exposed as separate sliders. The
-    side list keeps its base size — only its visible row COUNT is
-    configurable (see set_side_list_rows)."""
-    global POPUP_WIDTH, ITEM_HEIGHT, THUMB_SIZE, PREVIEW_W, LIST_MAX_H
-    p = clamp_scale(popup_pct) / 100.0
-    r = clamp_scale(row_pct)   / 100.0
-
-    POPUP_WIDTH = int(_BASE_POPUP_WIDTH * p)
-    PREVIEW_W   = int(_BASE_PREVIEW_W   * p)
+def apply_scales(row_pct=100):
+    """Apply the Row-size slider. Row icon follows row height. The window
+    size is drag-controlled (set_window_size); the side list keeps base
+    size (only its visible row COUNT is configurable)."""
+    global ITEM_HEIGHT, THUMB_SIZE
+    r = clamp_scale(row_pct) / 100.0
     ITEM_HEIGHT = int(_BASE_ITEM_HEIGHT * r)
     THUMB_SIZE  = int(_BASE_THUMB_SIZE  * r)
-    LIST_MAX_H  = int(_BASE_LIST_MAX_H  * r)
-    # Side list stays at its base dimensions
     SidePanelWidget.PANEL_W = _BASE_PANEL_W
     SidePanelWidget.ROW_H   = _BASE_PANEL_ROW_H
     SidePanelWidget.SCALE   = 1.0
+
+
+def set_window_size(w, h):
+    """Set the persisted main-window size (drag-resize / settings)."""
+    global POPUP_WIDTH, POPUP_HEIGHT
+    try:
+        w = int(w); h = int(h)
+    except (TypeError, ValueError):
+        w, h = _BASE_POPUP_WIDTH, _BASE_POPUP_HEIGHT
+    POPUP_WIDTH  = max(MIN_POPUP_W, w)
+    POPUP_HEIGHT = max(MIN_POPUP_H, h)
+
+
+def resize_edges_at(px, py, w, h, ml, mt, mr, mb):
+    """Which window edges a point grips — the transparent margin band around
+    the visible card is the resize handle. Returns a set of 'L','R','T','B'."""
+    e = set()
+    if px < ml:        e.add("L")
+    elif px >= w - mr: e.add("R")
+    if py < mt:        e.add("T")
+    elif py >= h - mb: e.add("B")
+    return e
+
+
+def apply_resize(geo, edges, dx, dy, min_w=MIN_POPUP_W, min_h=MIN_POPUP_H):
+    """Pure resize math: start geometry + gripped edges + mouse delta →
+    new QRect, honouring the minimum size. The opposite edge stays put."""
+    l, t, r, b = geo.left(), geo.top(), geo.right(), geo.bottom()
+    if "L" in edges: l = min(l + dx, r - min_w + 1)
+    if "R" in edges: r = max(r + dx, l + min_w - 1)
+    if "T" in edges: t = min(t + dy, b - min_h + 1)
+    if "B" in edges: b = max(b + dy, t + min_h - 1)
+    return QRect(QPoint(l, t), QPoint(r, b))
+
+
+def cursor_for_edges(edges):
+    if edges == {"L", "T"} or edges == {"R", "B"}:
+        return Qt.CursorShape.SizeFDiagCursor
+    if edges == {"R", "T"} or edges == {"L", "B"}:
+        return Qt.CursorShape.SizeBDiagCursor
+    if "L" in edges or "R" in edges:
+        return Qt.CursorShape.SizeHorCursor
+    if "T" in edges or "B" in edges:
+        return Qt.CursorShape.SizeVerCursor
+    return Qt.CursorShape.ArrowCursor
 
 
 def set_side_list_rows(n):
@@ -692,7 +730,10 @@ class ItemRowWidget(QWidget):
 
         self._build()
         self.setFixedHeight(ITEM_HEIGHT)
-        self.setFixedWidth(POPUP_WIDTH)
+        # Width EXPANDS to fill the (drag-resizable) window; only the height
+        # is fixed (row height is the density setting).
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Fixed)
 
     # ── Pin state ────────────────────────────────────────────────────────────
 
@@ -741,7 +782,11 @@ class ItemRowWidget(QWidget):
         preview = self.history.get_preview(item)
         self._preview_lbl = QLabel(preview, self)
         self._preview_lbl.setWordWrap(True)
-        self._preview_lbl.setMaximumWidth(PREVIEW_W)   # follows window width
+        # Ignore the wordwrap label's own width hint so it takes exactly the
+        # width the (stretchy) text column gives it and wraps to that — the
+        # text now widens with the window.
+        self._preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                        QSizePolicy.Policy.Preferred)
         self._preview_lbl.setFont(QFont("Segoe UI", max(6, int(10 * _FONT_SCALE))))
         self._preview_lbl.setStyleSheet(f"color:{C['text_preview']};background:transparent;")
         text_col.addWidget(self._preview_lbl)
@@ -750,11 +795,20 @@ class ItemRowWidget(QWidget):
         self._source_lbl = QLabel(f"From: {src}", self)
         self._source_lbl.setFont(QFont("Segoe UI", max(6, int(8 * _FONT_SCALE))))
         self._source_lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+        # A long "From: C:\...\path" has no wordwrap, so its full text width
+        # would force the whole ROW wider than the window — clipping the text
+        # and pushing the action buttons off the right edge. Ignored width
+        # lets it shrink (clipping the path tail) so the row fills the window.
+        self._source_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
+                                       QSizePolicy.Policy.Preferred)
         text_col.addWidget(self._source_lbl)
         text_col.addStretch()
 
-        main.addLayout(text_col)
-        main.addStretch()
+        # text column takes the FLEXIBLE space (stretch=1); the fixed count
+        # badge and action buttons keep their place at the right. (An extra
+        # addStretch here competed with the greedy text and pushed the
+        # buttons off the row edge — the "buttons gone" bug.)
+        main.addLayout(text_col, 1)
 
         # Content count badge — how many files in a multi-file entry, or
         # how many items inside a single copied folder.
@@ -1645,6 +1699,106 @@ class SidePanelWidget(QWidget):
 
 # ── Main popup window ─────────────────────────────────────────────────────────
 
+class _PopupWindow(QWidget):
+    """The frameless popup window, made drag-resizable by hand.
+
+    A frameless window has no native resize borders, so the transparent
+    shadow margin around the visible card is used as the grip: moving the
+    mouse into that band shows a resize cursor, and dragging there resizes
+    the window. Manual (not WS_THICKFRAME) — no Aero snap, but it never
+    touches the translucent / no-activate window internals that the native
+    route would, so it can't reintroduce those bugs. The card interior is
+    covered by child widgets, which receive their own events untouched.
+    """
+
+    def __init__(self, on_resized=None):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint |
+                               Qt.WindowType.WindowStaysOnTopHint |
+                               Qt.WindowType.Tool)
+        self._on_resized  = on_resized     # called with (w, h) after a drag
+        self._edges       = set()          # edges being dragged
+        self._start_geo   = None
+        self._start_mouse = None
+        self._grabbed     = False
+        self._dirty       = False          # geometry actually changed
+        self._margins     = (18, 14, 18, 22)   # kept in sync by the builder
+        self.setMouseTracking(True)
+
+    def set_grip_margins(self, ml, mt, mr, mb):
+        self._margins = (ml, mt, mr, mb)
+
+    def _edges_at(self, pos):
+        ml, mt, mr, mb = self._margins
+        return resize_edges_at(pos.x(), pos.y(), self.width(), self.height(),
+                               ml, mt, mr, mb)
+
+    def _end_resize(self):
+        """Tear down resize state completely — ALWAYS restore the cursor and
+        release the mouse grab, or the popup is left in resize mode (cursor
+        stuck, wheel events swallowed by the grab so the list can't scroll)."""
+        was = bool(self._edges)
+        self._edges = set()
+        self.unsetCursor()
+        if self._grabbed:
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+            self._grabbed = False
+        if was and self._dirty and self._on_resized:
+            self._on_resized(self.width(), self.height())
+        self._dirty = False
+
+    def mouseMoveEvent(self, e):
+        if self._edges:
+            if not (e.buttons() & Qt.MouseButton.LeftButton):
+                self._end_resize()          # release was missed — self-heal
+            else:
+                d = e.globalPosition().toPoint() - self._start_mouse
+                geo = apply_resize(self._start_geo, self._edges, d.x(), d.y())
+                if geo != self.geometry():
+                    self.setGeometry(geo)
+                    self._dirty = True
+        else:
+            # Idle: show the resize cursor only while over a grip band. The
+            # card (a child) carries its own Arrow cursor, so the interior
+            # never inherits this — that was the "cursor stuck" bug.
+            edges = self._edges_at(e.position().toPoint())
+            if edges:
+                self.setCursor(cursor_for_edges(edges))
+            else:
+                self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            edges = self._edges_at(e.position().toPoint())
+            if edges:
+                self._edges       = edges
+                self._start_geo   = self.geometry()
+                self._start_mouse = e.globalPosition().toPoint()
+                self._dirty       = False
+                # Explicit grab so EVERY move/release reaches us (even over
+                # child widgets) and the release is guaranteed delivered.
+                self.grabMouse()
+                self._grabbed = True
+                e.accept()
+                return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._edges:
+            self._end_resize()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def leaveEvent(self, e):
+        if not self._edges:
+            self.unsetCursor()
+        super().leaveEvent(e)
+
+
 class _PopupSignals(QObject):
     """Signals for thread-safe cross-thread calls into DropdownPopup.
     Emitting a signal from any thread safely invokes the connected slot
@@ -1886,8 +2040,9 @@ class DropdownPopup(QObject):
         self._opacity = self.history.settings.get("transparency", 1.0) if self.history else 1.0
         if self.history:
             set_icon_pack(self.history.settings.get("icon_pack", "default"))
-            apply_scales(self.history.settings.get("scale_popup", 100),
-                         self.history.settings.get("scale_row",   100))
+            apply_scales(self.history.settings.get("scale_row", 100))
+            set_window_size(self.history.settings.get("popup_w", _BASE_POPUP_WIDTH),
+                            self.history.settings.get("popup_h", _BASE_POPUP_HEIGHT))
             set_side_list_rows(self.history.settings.get("side_list_rows", 10))
             set_hover_colour(self.history.settings.get("hover_colour", "default"))
             set_font_scale(self.history.settings.get("font_scale", 100))
@@ -1899,10 +2054,9 @@ class DropdownPopup(QObject):
         else:
             items = self.history.get_all() if self.history else []
 
-        # Build window
-        popup = QWidget(None, Qt.WindowType.FramelessWindowHint |
-                               Qt.WindowType.WindowStaysOnTopHint |
-                               Qt.WindowType.Tool)
+        # Build window — a _PopupWindow (drag-resizable via its shadow-margin
+        # grips; persists the new size through _on_window_resized).
+        popup = _PopupWindow(on_resized=self._on_window_resized)
         popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         popup.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # Translucent window + inner rounded "card" + Qt drop shadow =
@@ -1924,8 +2078,12 @@ class DropdownPopup(QObject):
         # is incorrect") and the popup freezes showing stale content.
         outer = QVBoxLayout(popup)
         outer.setContentsMargins(18, 14, 18, 22)
+        popup.set_grip_margins(18, 14, 18, 22)   # resize handles = this band
         card = QWidget(popup)
         card.setObjectName("clipdrop_card")
+        # Explicit cursor so the card interior (and its children) never
+        # inherit the window's resize cursor set while over the grip band.
+        card.setCursor(Qt.CursorShape.ArrowCursor)
         card.setStyleSheet(
             f"QWidget#clipdrop_card {{background:{C['bg']};"
             f"border:1px solid {C['border']};border-radius:10px;}}")
@@ -1979,38 +2137,25 @@ class DropdownPopup(QObject):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(f"QScrollArea{{border:none;background:{C['bg']};}} "
                              + _scrollbar_qss(C))
-        scroll.setFixedWidth(POPUP_WIDTH + 10)
-        max_h = min(len(items) * ITEM_HEIGHT + 4, LIST_MAX_H) if items else 100
-        scroll.setFixedHeight(max_h)
-        main_lay.addWidget(scroll)
-        self._scroll = scroll   # kept so _refresh can resize in place
-        # Chrome height = everything around the scroll area (header, search
-        # bar, separators, margins). Measured HERE, where the fresh layout
-        # is known-correct — _refresh derives exact window heights from it
-        # instead of trusting sizeHint(), which can be stale mid-mutation
-        # and leaves the window too tall (content then spreads with gaps).
-        self._chrome_h = None   # set right after adjustSize() below
+        # The list EXPANDS to fill whatever height the (drag-resizable) window
+        # gives it — so the visible row count follows the window height, and
+        # overflow scrolls. No fixed sizes: the window owns the size now.
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding,
+                             QSizePolicy.Policy.Expanding)
+        main_lay.addWidget(scroll, 1)
+        self._scroll = scroll
 
         # Connect search
         self._search_edit.textChanged.connect(self._on_search)
 
-        # Escape is handled by the global keyboard hook (see __init__) —
-        # a QShortcut would only fire while the window is active, and
-        # this window deliberately never activates.
-
-        # Build is complete — now size, position, THEN show.
-        # Showing AFTER positioning means the window appears exactly where
-        # it should on the first paint — no flash at 0,0 first.
-        popup.adjustSize()
-        self._chrome_h = popup.height() - max_h   # see note at _scroll above
-        # Chrome is known now, so the screen ceiling can be applied: shrink
-        # the LIST (never the window) so tall content scrolls instead of
-        # being clipped, and the window can't exceed the screen.
-        fitted = self._fit_list_h(max_h, x, y)
-        if fitted != max_h:
-            max_h = fitted
-            scroll.setFixedHeight(max_h)
-            popup.setFixedHeight(self._chrome_h + max_h)
+        # Size the WINDOW to the persisted (drag-controlled) size, clamped so
+        # it never exceeds the work area, then position at the cursor.
+        anchor = getattr(self, "_anchor_override", None)
+        ax, ay = anchor if anchor else (QCursor.pos().x(), QCursor.pos().y())
+        g = self._work_area(ax, ay)
+        win_w = min(POPUP_WIDTH,  g.width())
+        win_h = min(POPUP_HEIGHT, g.height())
+        popup.resize(win_w, win_h)
         self._position_popup(x, y)
         popup.show()
         # WS_EX_NOACTIVATE — winId is valid now that show() has been called.
@@ -2316,20 +2461,17 @@ class DropdownPopup(QObject):
         screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
         return screen.availableGeometry()
 
-    def _fit_list_h(self, desired: int, x: int, y: int) -> int:
-        """Cap the LIST height so the whole window fits the screen.
-
-        Capping the list (rather than shrinking the window afterwards)
-        means the overflow becomes SCROLLING instead of clipped content.
-        Three ceilings, smallest wins: how much content there is, the
-        user's size setting, and what physically fits on screen.
-        """
-        chrome = getattr(self, "_chrome_h", 0) or 0
-        return max(80, min(desired, self._work_area(x, y).height() - chrome))
+    def _on_window_resized(self, w: int, h: int):
+        """Persist the window size after the user drags an edge."""
+        set_window_size(w, h)
+        if self.history:
+            self.history.save_setting("popup_w", int(w))
+            self.history.save_setting("popup_h", int(h))
 
     def _position_popup(self, x: int, y: int):
         popup = self._popup
-        popup.adjustSize()
+        # NOTE: do NOT adjustSize() — the window is sized explicitly (drag /
+        # settings) before this call; adjustSize would shrink it to content.
         w = popup.width()
         h = popup.height()
         # Anchor on Qt's OWN cursor position. The (x, y) forwarded from the
@@ -2622,32 +2764,11 @@ class DropdownPopup(QObject):
                 except RuntimeError:
                     pass
 
-            # Window height follows the item count — computed EXACTLY from
-            # the chrome height measured at build time and hard-set.
-            # (sizeHint-based resizing proved unreliable mid-mutation: a
-            # stale hint left the window tall and the fixed-height children
-            # spread apart with exposed gaps.)
-            if getattr(self, "_scroll", None) is not None:
-                max_h = min(len(items) * ITEM_HEIGHT + 4, LIST_MAX_H) if items else 100
-                chrome = getattr(self, "_chrome_h", None)
-                if chrome:
-                    # Same screen ceiling as the build path, measured on the
-                    # monitor this popup is currently sitting on.
-                    c = popup.geometry().center()
-                    max_h = self._fit_list_h(max_h, c.x(), c.y())
-                self._scroll.setFixedHeight(max_h)
-                if chrome:
-                    popup.setFixedHeight(chrome + max_h)
-                else:   # fallback — should not happen after a normal build
-                    lay = popup.layout()
-                    if lay is not None:
-                        lay.activate()
-                    popup.adjustSize()
+            # The window KEEPS its drag-controlled size across refreshes —
+            # the list simply shows more/fewer rows (overflow scrolls). No
+            # window resize here, so none of the earlier resize-time bugs
+            # (layered-window repaint rejection, gap-spreading) can occur.
         finally:
-            # The window may have grown or shrunk — slide it back inside the
-            # work area before repainting, so a taller list can't push the
-            # window through the taskbar while it's open.
-            self._reclamp_position()
             popup.setUpdatesEnabled(True)
             popup.update()
             # One more full repaint AFTER the deferred row deletions run

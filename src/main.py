@@ -13,6 +13,28 @@ import os
 import threading
 import sys
 
+# ── Claim Per-Monitor-v2 DPI awareness FIRST ────────────────────────────────
+# This MUST run before anything imports pyautogui: pyautogui calls the old
+# SetProcessDPIAware() at import time, forcing System-DPI mode, which then
+# makes Qt's own Per-Monitor setup fail ("SetProcessDpiAwarenessContext:
+# Access is denied") and mismatches coordinates and layout on scaled
+# displays (125% / 150%) — the popup lands off-cursor and rows stop
+# resizing. Setting Per-Monitor-v2 here, before those imports, makes Qt and
+# the process agree on one coordinate system.
+def _set_dpi_awareness():
+    import ctypes
+    try:                        # Win10 1703+ : Per-Monitor-Aware v2
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:                        # Win8.1+ fallback : Per-Monitor-Aware
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+_set_dpi_awareness()
+
 # Silence benign DirectWrite font warnings: Qt's glyph fallback (emoji in
 # labels) enumerates legacy Windows BITMAP fonts (8514oem, Fixedsys) that
 # DirectWrite cannot load. Text renders fine via the next fallback — the

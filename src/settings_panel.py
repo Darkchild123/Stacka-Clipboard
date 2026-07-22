@@ -729,11 +729,10 @@ class SettingsPanel(QWidget):
     # 100% = the app's default size. Deliberately caption-free: at this
     # window width a per-row caption wraps to 2-3 lines and triples the
     # section's height.
-    # Percent sliders (60–120% in 10% steps). Main window stays for now —
-    # it is replaced by drag-to-resize in a later step.
+    # Percent sliders (60–120% in 10% steps). The main window is resized by
+    # dragging its edges, so it has no slider here — only row size.
     SIZE_SLIDERS = [
-        ("scale_popup", "Main window"),
-        ("scale_row",   "Row size"),
+        ("scale_row", "Row size"),
     ]
 
     def _section_sizing(self) -> QWidget:
