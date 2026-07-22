@@ -903,7 +903,13 @@ class SettingsPanel(QWidget):
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
         lay.addWidget(self._heading("🖱️  Popup trigger"))
-        self._trigger_mode = self.history.settings.get("trigger_mode", "double_right")
+        hint = QLabel("Pick up to two — e.g. overlay button + double "
+                      "right-click. “Hotkey only” can’t be combined.", w)
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;"
+                           f"background:transparent;")
+        lay.addWidget(hint)
+        self._triggers = self._read_triggers()
         self._trigger_btns = {}
 
         for mode, label, caption in self.TRIGGER_MODES:
@@ -911,7 +917,7 @@ class SettingsPanel(QWidget):
             rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
             btn = QPushButton(label, row)
             btn.setFixedWidth(165)
-            btn.clicked.connect(lambda _=False, m=mode: self._set_trigger_mode(m))
+            btn.clicked.connect(lambda _=False, m=mode: self._toggle_trigger(m))
             rl.addWidget(btn)
             cap = QLabel(caption, row)
             cap.setWordWrap(True)
@@ -928,13 +934,45 @@ class SettingsPanel(QWidget):
         active   = _btn_style(C["accent"], C["accent_hover"])
         inactive = _btn_style(C["bg_section"], C["accent"], C["text_dim"])
         for mode, btn in self._trigger_btns.items():
-            btn.setStyleSheet(active if mode == self._trigger_mode else inactive)
+            btn.setStyleSheet(active if mode in self._triggers else inactive)
 
-    def _set_trigger_mode(self, mode: str):
-        if mode == self._trigger_mode:
-            return
-        self._trigger_mode = mode
-        self.history.save_setting("trigger_mode", mode)
+    def _read_triggers(self):
+        """Current trigger selection (1–2), migrating the legacy single
+        'trigger_mode' and enforcing hotkey exclusivity."""
+        s = self.history.settings
+        trs = s.get("triggers")
+        if not isinstance(trs, list) or not trs:
+            trs = [s.get("trigger_mode", "double_right")]
+        valid = {m for m, _, _ in self.TRIGGER_MODES}
+        trs = [t for t in trs if t in valid]
+        if not trs:
+            trs = ["double_right"]
+        if "hotkey" in trs:          # hotkey can't be paired
+            trs = ["hotkey"]
+        return trs[:2]
+
+    def _toggle_trigger(self, mode: str):
+        """Toggle a trigger in/out of the selection (up to two). 'Hotkey only'
+        is exclusive — picking it clears the rest, and picking any mouse
+        trigger clears it. The last active trigger can't be switched off (there
+        must always be one), and picking a third drops the oldest."""
+        trs = list(self._triggers)
+        if mode == "hotkey":
+            trs = ["hotkey"]                         # exclusive
+        else:
+            trs = [t for t in trs if t != "hotkey"]  # leaving hotkey-only
+            if mode in trs:
+                trs.remove(mode)
+                if not trs:                          # never leave it empty
+                    trs = [mode]
+            else:
+                trs.append(mode)
+                if len(trs) > 2:
+                    trs.pop(0)                        # keep the last two
+        self._triggers = trs
+        self.history.save_setting("triggers", trs)
+        # Mirror the first choice into the legacy key for backward compat.
+        self.history.save_setting("trigger_mode", trs[0])
         self._refresh_trigger_buttons()
 
     def _section_behaviour(self) -> QWidget:

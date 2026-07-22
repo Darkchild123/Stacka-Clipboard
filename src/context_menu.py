@@ -54,6 +54,11 @@ WINEVENT_SKIPOWNPROCESS = 0x0002   # ignore our own popup's QMenus
 
 HOTKEY = "ctrl+shift+v"
 
+# Mouse-trigger modes the low-level hook can act on — a user picks up to two in
+# Settings. "hotkey" is deliberately NOT here: it means "no mouse trigger" (the
+# popup hotkey is always bound separately), so it never combines with these.
+_MOUSE_TRIGGERS = {"double_right", "button", "middle", "side", "ctrl_right"}
+
 # ── Configurable shortcuts (canonical table) ─────────────────────────────────
 # (settings_key, label shown in the Shortcuts window, default combo)
 # The Shortcuts window builds its rows from this list; ContextMenu binds
@@ -211,6 +216,27 @@ class OverlayButton(QWidget):
             except Exception:
                 pass
 
+    def _bring_to_front(self):
+        """Push the button to the very top of the topmost z-order and re-raise.
+        Lifts it above in-page / Chromium menus (which hold no system mouse
+        capture), so an unavoidable overlap there stays visible AND clickable.
+        Native menus DO capture the mouse, so this can't make the button
+        clickable over THEM — which is why _place flees the menu instead."""
+        if not self.isVisible():
+            return
+        try:
+            import win32con
+            hwnd = int(self.winId())
+            win32gui.SetWindowPos(
+                hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        except Exception:
+            pass
+        try:
+            self.raise_()
+        except Exception:
+            pass
+
     def show_at(self):
         """Place the button from the cursor TIP, in the quadrant OPPOSITE the
         one the native menu grows into — so it can never cover the menu, with
@@ -240,7 +266,11 @@ class OverlayButton(QWidget):
         self.move(bx, by)
         self.show()
         self._apply_no_activate()
-        self.raise_()
+        self._bring_to_front()
+        # In-page / Chromium menus render a beat AFTER the click — re-raise
+        # above them once they've appeared.
+        QTimer.singleShot(60,  self._bring_to_front)
+        QTimer.singleShot(160, self._bring_to_front)
         self._timer.start(3000)
 
     @staticmethod
@@ -255,36 +285,36 @@ class OverlayButton(QWidget):
         """Cursor-anchored placement — no menu measurement.
 
         A Windows context menu is anchored at the click and grows into the ONE
-        quadrant with room: down-right by default, flipping up and/or left near
-        the bottom / right edges (which is why it seems to open in any of the
-        four directions). Since the menu fills a single quadrant off the tip,
-        the button can't overlap it as long as it sits on the OPPOSITE side of
-        the tip on one axis.
-
-        Primary — beside the cursor, opposite the menu's horizontal growth, at
-        tip height: horizontal separation alone clears the menu at any height.
-        Fallback (cursor jammed against that side edge) — escape vertically,
-        opposite the vertical growth; vertical separation then clears it. A
-        true screen corner is the irreducible dead zone: clamp, and (by design)
-        keep the vertical side. (cw, ch) clear the arrow whenever the button
-        lands on the pointer's down / right side."""
+        quadrant with room (down-right by default; it flips up / left near the
+        bottom / right edges). Crucially its WIDTH is bounded (a few hundred px)
+        while its HEIGHT is not — a long menu can span the whole screen height,
+        and near a border Windows re-centres it vertically on the cursor. So we
+        clear it HORIZONTALLY, which holds at any menu height: the button goes
+        on the side of the tip the menu doesn't grow into, or — if the cursor
+        is jammed against that edge — just PAST the menu's far side (assuming a
+        generous max width). Only if neither horizontal slot fits (a narrow
+        window) do we drop to above/below, then clamp; show_at() also raises
+        the button to the front so any unavoidable overlap stays visible over
+        in-page menus."""
         GAP = 10
-        # The menu opens toward the side with room; near an edge it flips.
-        grow_right = (g.right() - x) >= 180      # else it opens leftward
-        grow_down  = (g.bottom() - y) >= 150     # else it opens upward
+        MENU_W = 340        # assumed max context-menu width, to clear PAST it
+        grow_right = (g.right() - x) >= 180      # else the menu opens leftward
+        grow_down  = (g.bottom() - y) >= 150     # else upward (vertical fallback)
 
-        # ── Primary: opposite the horizontal growth, centred on the tip. ──
-        by = self._clampv(y - h // 2, h, g)
+        # ── Clear the menu HORIZONTALLY (robust to any menu height). ──
+        by = self._clampv(y - h // 2, h, g)      # beside the cursor, tip height
         if grow_right:
-            bx = x - GAP - w                     # LEFT of tip (arrow is right)
-            if bx >= g.left():
-                return bx, by
+            # menu ≈ [x, x+MENU_W] → sit LEFT of the tip, else PAST the menu.
+            cands = (x - GAP - w, x + MENU_W + GAP)
         else:
-            bx = x + GAP + cw                    # RIGHT of tip, past the arrow
-            if bx + w <= g.right():
+            # menu ≈ [x-MENU_W, x] → sit RIGHT of the tip (clear the arrow),
+            # else PAST the menu on the left.
+            cands = (x + GAP + cw, x - MENU_W - GAP - w)
+        for bx in cands:
+            if g.left() <= bx and bx + w <= g.right():
                 return bx, by
 
-        # ── Fallback: escape vertically, opposite the vertical growth. ──
+        # ── Narrow window: escape vertically, opposite the vertical growth. ──
         bx = self._clamph(x - w // 2, w, g)
         up_y, down_y = y - GAP - h, y + GAP + ch
         vorder = [up_y, down_y] if grow_down else [down_y, up_y]
@@ -292,7 +322,7 @@ class OverlayButton(QWidget):
             if g.top() <= vy and vy + h <= g.bottom():
                 return bx, vy
 
-        # ── Dead-zone corner: keep the preferred vertical side, clamped. ──
+        # ── Last resort: clamp (overlap accepted; raised to front above). ──
         return bx, self._clampv(vorder[0], h, g)
 
     def enterEvent(self, e):
@@ -420,6 +450,13 @@ class ContextMenu:
     def _on_mouse_trigger(self, x, y, dismiss_menu):
         """A mouse-gesture trigger fired (main thread). The paste target
         was captured on the click, before any menu stole focus."""
+        # A gesture opened the popup — dismiss any overlay a PAIRED 'button'
+        # trigger showed on the same click, so it doesn't linger behind it.
+        try:
+            if self._overlay:
+                self._overlay.hide()
+        except Exception:
+            pass
         try:
             self.popup._paste_target = (self._rclick_target
                                         or win32gui.GetForegroundWindow())
@@ -431,6 +468,20 @@ class ContextMenu:
             except Exception:
                 pass
         self.popup.show(x, y)
+
+    def _active_triggers(self):
+        """The mouse-trigger modes to run for this event (0–2). Reads the
+        'triggers' list (falling back to the legacy single 'trigger_mode'),
+        keeps only real mouse triggers and caps at two. An all-'hotkey'
+        selection yields an empty list — hotkey only, no mouse trigger."""
+        try:
+            s = self.history.settings
+            trs = s.get("triggers")
+            if not isinstance(trs, list) or not trs:
+                trs = [s.get("trigger_mode", "double_right")]
+        except Exception:
+            return ["double_right"]
+        return [t for t in trs if t in _MOUSE_TRIGGERS][:2]
 
     def _handle_trigger(self, mode, wParam, lParam, MSLLHOOKSTRUCT, user32):
         """Per-mode mouse-trigger dispatch (hook thread). Returns True to
@@ -606,14 +657,18 @@ class ContextMenu:
                         self._swallow_ups.discard(wParam)
                         return 1
                     # Settings read only on real button events, never moves.
+                    # Up to two mouse triggers can be active at once — run each,
+                    # stopping at the first that CONSUMES the event so a paired
+                    # trigger can't fire the popup twice.
                     try:
-                        mode = self.history.settings.get("trigger_mode", "double_right")
+                        modes = self._active_triggers()
                     except Exception:
-                        mode = "double_right"
+                        modes = ["double_right"]
                     try:
-                        if self._handle_trigger(mode, wParam, lParam,
-                                                MSLLHOOKSTRUCT, user32):
-                            return 1   # consumed the click
+                        for mode in modes:
+                            if self._handle_trigger(mode, wParam, lParam,
+                                                    MSLLHOOKSTRUCT, user32):
+                                return 1   # consumed the click
                     except Exception as e:
                         print(f"Hook proc error: {e}")
             return user32.CallNextHookEx(self.hook_id, nCode, wParam, lParam)
