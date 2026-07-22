@@ -80,8 +80,79 @@ OVERLAY_BG    = "#4f46e5"
 OVERLAY_HOVER = "#6366f1"
 
 
+# ── Current-cursor geometry ──────────────────────────────────────────────────
+# Windows exposes the cursor as a hotspot POINT plus a bitmap; the bitmap's
+# size (GetIconInfo → GetObject) is the only reliable read of the pointer's
+# on-screen extent, and it tracks the accessibility "large pointer" setting.
+# Used purely as a clearance so the overlay never sits on top of the arrow when
+# it lands on the pointer's down/right side. argtypes are declared so 64-bit
+# HANDLEs are not truncated (the same class of bug as the mouse-hook lParam).
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+class _CURSORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                ("hCursor", wintypes.HANDLE), ("ptScreenPos", _POINT)]
+
+class _ICONINFO(ctypes.Structure):
+    _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD),
+                ("yHotspot", wintypes.DWORD), ("hbmMask", wintypes.HBITMAP),
+                ("hbmColor", wintypes.HBITMAP)]
+
+class _BITMAP(ctypes.Structure):
+    _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG),
+                ("bmHeight", wintypes.LONG), ("bmWidthBytes", wintypes.LONG),
+                ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                ("bmBits", ctypes.c_void_p)]
+
+try:
+    _user32 = ctypes.windll.user32
+    _gdi32  = ctypes.windll.gdi32
+    _user32.GetCursorInfo.argtypes = [ctypes.POINTER(_CURSORINFO)]
+    _user32.GetCursorInfo.restype  = wintypes.BOOL
+    _user32.GetIconInfo.argtypes   = [wintypes.HANDLE, ctypes.POINTER(_ICONINFO)]
+    _user32.GetIconInfo.restype    = wintypes.BOOL
+    _gdi32.GetObjectW.argtypes     = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+    _gdi32.GetObjectW.restype      = ctypes.c_int
+    _gdi32.DeleteObject.argtypes   = [wintypes.HANDLE]
+    _gdi32.DeleteObject.restype    = wintypes.BOOL
+except Exception:
+    _user32 = _gdi32 = None
+
+
+def _cursor_size():
+    """Physical (width, height) of the current mouse-cursor bitmap, or a
+    32x32 fallback. Monochrome cursors stack AND+XOR masks, so their bitmap
+    is double height — halved here."""
+    if _user32 is not None and _gdi32 is not None:
+        try:
+            ci = _CURSORINFO(); ci.cbSize = ctypes.sizeof(_CURSORINFO)
+            if _user32.GetCursorInfo(ctypes.byref(ci)) and ci.hCursor:
+                ii = _ICONINFO()
+                if _user32.GetIconInfo(ci.hCursor, ctypes.byref(ii)):
+                    mono = not ii.hbmColor
+                    hbm  = ii.hbmColor or ii.hbmMask
+                    bmp  = _BITMAP()
+                    cw = ch = 0
+                    if _gdi32.GetObjectW(hbm, ctypes.sizeof(_BITMAP),
+                                         ctypes.byref(bmp)):
+                        cw = bmp.bmWidth
+                        ch = bmp.bmHeight // (2 if mono else 1)
+                    if ii.hbmMask:  _gdi32.DeleteObject(ii.hbmMask)
+                    if ii.hbmColor: _gdi32.DeleteObject(ii.hbmColor)
+                    if cw > 0 and ch > 0:
+                        return cw, ch
+        except Exception:
+            pass
+    try:
+        return (ctypes.windll.user32.GetSystemMetrics(13),   # SM_CXCURSOR
+                ctypes.windll.user32.GetSystemMetrics(14))   # SM_CYCURSOR
+    except Exception:
+        return 32, 32
+
+
 class _OverlaySignals(QObject):
-    show_overlay = pyqtSignal(int, int, object)   # x, y, menu_rect or None
+    show_overlay = pyqtSignal()                   # cursor position is read live
     hide_overlay = pyqtSignal()
     hide_popup_if_outside = pyqtSignal(int, int)
     run_action   = pyqtSignal(str)   # settings_key of a hotkey action —
@@ -140,16 +211,10 @@ class OverlayButton(QWidget):
             except Exception:
                 pass
 
-    def show_at(self, x: int, y: int, menu_rect):
-        """Place the button AT the cursor, hugging the context menu's
-        border — never covering the menu, never drifting across the
-        screen, never on the taskbar.
-
-        Anchor is always the CURSOR (where the user's attention is).
-        With a detected menu rect we sit just outside the menu border
-        nearest the cursor, vertically aligned with the click. Without
-        one we sit beside the cursor on the side the menu won't occupy.
-        """
+    def show_at(self):
+        """Place the button from the cursor TIP, in the quadrant OPPOSITE the
+        one the native menu grows into — so it can never cover the menu, with
+        no menu detection at all. See _place."""
         self._timer.stop()
         # sizeHint() asks the layout for its required size without needing
         # the widget to have been shown before. width()/height() on an
@@ -158,76 +223,77 @@ class OverlayButton(QWidget):
         hint = self.sizeHint()
         w = hint.width()  if hint.width()  > 0 else 200
         h = hint.height() if hint.height() > 0 else 40
-        # The screen the CLICK is on, taskbar excluded — primaryScreen()
-        # .geometry() put the button on the taskbar / wrong monitor.
-        screen = QApplication.screenAt(QPoint(x, y)) or QApplication.primaryScreen()
-        g = screen.availableGeometry()
+        # Anchor on Qt's OWN cursor reading (logical pixels), like the main
+        # popup — the mouse hook reports PHYSICAL pixels, which land offset on
+        # scaled (125% / 150%) displays. The overlay shows at click time, so
+        # the live cursor is the click point.
+        from PyQt6.QtGui import QCursor
+        c = QCursor.pos()
+        x, y = c.x(), c.y()
+        screen = QApplication.screenAt(c) or QApplication.primaryScreen()
+        g = screen.availableGeometry()          # taskbar excluded
+        dpr = screen.devicePixelRatio() or 1.0
+        cw_p, ch_p = _cursor_size()             # physical → logical
+        cw, ch = int(cw_p / dpr), int(ch_p / dpr)
 
-        if menu_rect:
-            pos_x, pos_y = self._beside_menu(x, y, menu_rect, w, h, g)
-        else:
-            pos_x, pos_y = self._beside_cursor(x, y, w, h, g)
-
-        self.move(pos_x, pos_y)
+        bx, by = self._place(x, y, w, h, cw, ch, g)
+        self.move(bx, by)
         self.show()
         self._apply_no_activate()
         self.raise_()
         self._timer.start(3000)
 
-    def _beside_menu(self, x, y, menu_rect, w, h, g):
-        """Hug the menu border nearest the cursor, at cursor height."""
-        ml, mt, mr, mb = menu_rect
-        GAP = 8
-        by = max(g.top(), min(y - h // 2, g.bottom() - h))
+    @staticmethod
+    def _clamph(bx, w, g):
+        return max(g.left(), min(bx, g.right() - w))
 
-        # Menus open FROM the click point: cursor sits on one vertical
-        # border of the menu. Prefer the border the cursor is nearest —
-        # that's directly beside the click.
-        left_x, right_x = ml - w - GAP, mr + GAP
-        order = ([left_x, right_x] if (x - ml) <= (mr - x)
-                 else [right_x, left_x])
-        for bx in order:
-            if g.left() <= bx and bx + w <= g.right():
+    @staticmethod
+    def _clampv(by, h, g):
+        return max(g.top(), min(by, g.bottom() - h))
+
+    def _place(self, x, y, w, h, cw, ch, g):
+        """Cursor-anchored placement — no menu measurement.
+
+        A Windows context menu is anchored at the click and grows into the ONE
+        quadrant with room: down-right by default, flipping up and/or left near
+        the bottom / right edges (which is why it seems to open in any of the
+        four directions). Since the menu fills a single quadrant off the tip,
+        the button can't overlap it as long as it sits on the OPPOSITE side of
+        the tip on one axis.
+
+        Primary — beside the cursor, opposite the menu's horizontal growth, at
+        tip height: horizontal separation alone clears the menu at any height.
+        Fallback (cursor jammed against that side edge) — escape vertically,
+        opposite the vertical growth; vertical separation then clears it. A
+        true screen corner is the irreducible dead zone: clamp, and (by design)
+        keep the vertical side. (cw, ch) clear the arrow whenever the button
+        lands on the pointer's down / right side."""
+        GAP = 10
+        # The menu opens toward the side with room; near an edge it flips.
+        grow_right = (g.right() - x) >= 180      # else it opens leftward
+        grow_down  = (g.bottom() - y) >= 150     # else it opens upward
+
+        # ── Primary: opposite the horizontal growth, centred on the tip. ──
+        by = self._clampv(y - h // 2, h, g)
+        if grow_right:
+            bx = x - GAP - w                     # LEFT of tip (arrow is right)
+            if bx >= g.left():
+                return bx, by
+        else:
+            bx = x + GAP + cw                    # RIGHT of tip, past the arrow
+            if bx + w <= g.right():
                 return bx, by
 
-        # No room on either side (menu spans the screen) → just outside
-        # the top/bottom border nearest the cursor.
-        bx = max(g.left(), min(x - w // 2, g.right() - w))
-        top_y, bot_y = mt - h - GAP, mb + GAP
-        vorder = ([top_y, bot_y] if (y - mt) <= (mb - y)
-                  else [bot_y, top_y])
+        # ── Fallback: escape vertically, opposite the vertical growth. ──
+        bx = self._clamph(x - w // 2, w, g)
+        up_y, down_y = y - GAP - h, y + GAP + ch
+        vorder = [up_y, down_y] if grow_down else [down_y, up_y]
         for vy in vorder:
             if g.top() <= vy and vy + h <= g.bottom():
                 return bx, vy
 
-        return self._beside_cursor(x, y, w, h, g)   # pathological fallback
-
-    def _beside_cursor(self, x, y, w, h, g):
-        """No menu rect detected: sit beside the cursor on the side the
-        menu won't occupy. Windows menus open RIGHTWARD from the click
-        when there's room, so the safe side is LEFT of the cursor —
-        unless the click is near the right screen edge (menu opens left,
-        so we go right). If NEITHER side has room, escape vertically:
-        just above the click, since menus open downward from it —
-        clamping horizontally instead would land inside the menu."""
-        GAP = 12
-        MENU_W = 220        # typical context-menu width
-        opens_right = (g.right() - x) >= MENU_W
-        if opens_right:
-            bx = x - w - GAP
-            by = y - h // 2
-        else:
-            bx = x + GAP
-            if bx + w <= g.right():
-                by = y - h // 2
-            else:                     # no room beside — go above the click
-                bx = g.right() - w
-                by = y - h - GAP
-                if by < g.top():      # top-right corner: below instead
-                    by = y + GAP
-        bx = max(g.left(), min(bx, g.right() - w))
-        by = max(g.top(), min(by, g.bottom() - h))
-        return bx, by
+        # ── Dead-zone corner: keep the preferred vertical side, clamped. ──
+        return bx, self._clampv(vorder[0], h, g)
 
     def enterEvent(self, e):
         self._lbl.setStyleSheet(self._lbl.styleSheet().replace(OVERLAY_BG, OVERLAY_HOVER))
@@ -300,9 +366,9 @@ class ContextMenu:
         self._signals.run_action.connect(self._dispatch_action)
         self._signals.open_popup_at.connect(self._on_mouse_trigger)
 
-    def _on_show_overlay(self, x, y, menu_rect):
+    def _on_show_overlay(self):
         if self._overlay:
-            self._overlay.show_at(x, y, menu_rect)
+            self._overlay.show_at()
 
     def _on_hide_overlay(self):
         if self._overlay:
@@ -315,21 +381,11 @@ class ContextMenu:
             self._right_click_target = None
         if not self._should_show_overlay():
             return
-
-        def find_and_show():
-            menu_rect = None
-            for wait in (0.10, 0.05, 0.05, 0.05, 0.05):
-                time.sleep(wait)
-                menu_rect = self._find_context_menu_rect(near=(x, y))
-                if menu_rect:
-                    break
-            if menu_rect is None:
-                # Tier 3, one shot: in-page menus via UI Automation —
-                # by now (~300 ms) the menu is fully rendered.
-                menu_rect = self._uia_menu_rect(x, y)
-            self._signals.show_overlay.emit(x, y, menu_rect)
-
-        threading.Thread(target=find_and_show, daemon=True).start()
+        # No menu detection any more: the button positions itself from the
+        # cursor, in the quadrant OPPOSITE the one the menu grows into (see
+        # OverlayButton._place), so it shows instantly in every app — no HWND
+        # scan, no UI-Automation, no comtypes.
+        self._signals.show_overlay.emit()
 
     def _should_show_overlay(self):
         # Never offer the "Paste from ClipDrop" overlay while ClipDrop's own
@@ -351,137 +407,10 @@ class ContextMenu:
             pass
         return True
 
-    def _find_context_menu_rect(self, near=None):
-        """Borders (left, top, right, bottom) of the open context menu.
-
-        Tier 1 — native Win32 menus: window class '#32768'. Exact match,
-        highest confidence (Explorer, desktop, classic apps).
-
-        Tier 2 — Chromium/Electron menus (Chrome, Edge, VS Code,
-        Discord…): real top-level popup HWNDs but with app-specific
-        window classes. Identified heuristically: visible WS_POPUP
-        window, no caption, menu-like proportions, adjacent to the
-        click, owned by the foreground app's process, and not ours.
-
-        NOT findable by any HWND scan: menus that web apps draw INSIDE
-        their page (no window of their own) — those fall back to the
-        cursor-side guess in OverlayButton._beside_cursor.
-        """
-        native, popup = [], []
-        fg_pid = None
-        if near is not None:
-            try:
-                fg = win32gui.GetForegroundWindow()
-                fg_pid = win32process.GetWindowThreadProcessId(fg)[1]
-            except Exception:
-                pass
-        my_pid = os.getpid()
-
-        def cb(hwnd, _):
-            try:
-                if not win32gui.IsWindowVisible(hwnd):
-                    return
-                cls  = win32gui.GetClassName(hwnd)
-                rect = win32gui.GetWindowRect(hwnd)
-                w, h = rect[2] - rect[0], rect[3] - rect[1]
-
-                if cls == "#32768":                    # Tier 1
-                    if w > 10 and h > 10:
-                        native.append(rect)
-                    return
-
-                if near is None:                       # Tier 2 needs the click
-                    return
-                pid = win32process.GetWindowThreadProcessId(hwnd)[1]
-                if pid == my_pid:                      # our own popup/overlay
-                    return
-                if fg_pid is not None and pid != fg_pid:
-                    return                             # not the clicked app
-                style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
-                if not (style & win32con.WS_POPUP):
-                    return
-                if (style & win32con.WS_CAPTION) == win32con.WS_CAPTION:
-                    return                             # real window, not a menu
-                if not (80 <= w <= 520 and 40 <= h <= 900):
-                    return                             # not menu proportions
-                # A context menu opens FROM the click — the click point
-                # must touch (or nearly touch) its frame.
-                x, y = near
-                M = 32
-                if not (rect[0] - M <= x <= rect[2] + M and
-                        rect[1] - M <= y <= rect[3] + M):
-                    return
-                popup.append(rect)
-            except Exception:
-                pass
-
-        try:
-            win32gui.EnumWindows(cb, None)
-        except Exception:
-            pass
-        if native:
-            return native[0]
-        if popup:
-            # Smallest candidate — submenu/tooltip windows are filtered by
-            # proportions above; the menu is the tightest fit to the click
-            return min(popup, key=lambda r: (r[2]-r[0]) * (r[3]-r[1]))
-        return None
-
-    def _uia_menu_rect(self, x, y):
-        """Tier 3 — menus drawn INSIDE an app's window (web pages and
-        Electron apps: Claude, Slack, Teams…). No HWND exists for those,
-        so no window scan can find them. Instead, ask the app's UI
-        Automation (accessibility) tree for an open menu element and use
-        its bounding rectangle.
-
-        Caveats, by design:
-        - Works only when the app exposes menus to accessibility.
-          Chromium/Electron do — but their accessibility layer wakes
-          LAZILY on the first UIA query, so the first right-click in an
-          app may miss while later ones hit.
-        - One shot only, after the fast HWND tiers missed (UIA tree
-          walks cost tens of milliseconds).
-        """
-        try:
-            import comtypes
-            import comtypes.client
-            comtypes.CoInitialize()   # fresh thread per detection run
-            try:
-                comtypes.client.GetModule("UIAutomationCore.dll")
-                from comtypes.gen.UIAutomationClient import (
-                    CUIAutomation, IUIAutomation)
-                uia = comtypes.client.CreateObject(
-                    CUIAutomation, interface=IUIAutomation)
-                fg = win32gui.GetForegroundWindow()
-                if not fg:
-                    return None
-                root = uia.ElementFromHandle(fg)
-                # UIA_ControlTypePropertyId (30003) == Menu (50009).
-                # FindAll, not FindFirst: an app can have a menu BAR in
-                # its tree too — we want the menu AT the click.
-                cond  = uia.CreatePropertyCondition(30003, 50009)
-                found = root.FindAll(4, cond)   # TreeScope_Descendants
-                if found is None:
-                    return None
-                M = 40                          # menu must touch the click
-                best = None
-                for i in range(found.Length):
-                    r = found.GetElement(i).CurrentBoundingRectangle
-                    l, t, rr, b = (int(r.left), int(r.top),
-                                   int(r.right), int(r.bottom))
-                    w, h = rr - l, b - t
-                    if not (60 <= w <= 700 and 30 <= h <= 1000):
-                        continue                # not menu proportions
-                    if not (l - M <= x <= rr + M and t - M <= y <= b + M):
-                        continue                # a menubar or distant menu
-                    area = w * h
-                    if best is None or area < best[0]:
-                        best = (area, (l, t, rr, b))
-                return best[1] if best else None
-            finally:
-                comtypes.CoUninitialize()
-        except Exception:
-            return None   # comtypes missing / app exposes nothing — fall back
+    # Menu-rectangle detection (native #32768 scan, Chromium heuristic, and
+    # the UI-Automation / comtypes path) was removed: the overlay now
+    # positions itself from the cursor, opposite the quadrant the menu grows
+    # into, so no menu measurement is needed — see OverlayButton._place.
 
     def _on_overlay_clicked(self):
         self.popup._paste_target = self._right_click_target
