@@ -238,16 +238,17 @@ still works everywhere; only the right-click overlay is blocked for
 those windows. Running ClipDrop itself as Administrator lifts the
 restriction, at the cost of the app starting elevated.
 
-### In-page (web / Electron) context menus
+### Context menus the overlay can't measure
 
-Apps that draw their right-click menus inside their own window as
-HTML — the Claude app, Slack, Teams, some web apps — expose no window
-handle to measure. ClipDrop falls back to **UI Automation** (the
-accessibility layer) to read those menus' bounds. This works for most
-Chromium/Electron apps, but their accessibility tree wakes *lazily*, so
-the very first right-click in a freshly launched app may miss (the
-button positions by cursor heuristic); subsequent clicks land correctly.
-Apps that expose nothing to accessibility keep the cursor-side fallback.
+The overlay button doesn't detect the app's menu at all — it positions
+itself from the **cursor**, in the quadrant opposite the one a menu grows
+into (and, near an edge, just past a menu's typical width). That's a
+*prediction*, so an unusually wide menu, or one that opens in an
+unexpected direction, can still overlap the button in the rare
+screen-corner dead-zone. There the button is raised to the front so it
+stays visible over **in-page** menus (Slack, Teams, web apps); a
+**native** menu captures the mouse, so pair the overlay with a gesture
+trigger — or use a gesture alone — if an app's menus fight it.
 
 ### Distribution note — code signing
 
@@ -443,6 +444,8 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-22 | Remove in every right-click menu (honouring multi-selection); folder-content rows gain "Remove from list" (hides the row without deleting the file from disk); "Delete" wording changed to "Remove" throughout |
 | 2026-07-22 | Context menus auto-dismiss on hover-out (main list and side lists); right-click no longer changes the selection; the overlay button is suppressed while the app popup is open |
 | 2026-07-22 | Independent profiles — sending a clip to a profile stores its own copy, so trimming, deleting or reordering in one list never affects another; each profile trims to the shared size limit independently, with automatic migration of existing profiles |
+| 2026-07-22 | Overlay button rewritten to position from the cursor — sits opposite the menu's growth quadrant and escapes past long / re-centred menus, raising above in-page menus when overlap is unavoidable; the three-tier menu detection (and the comtypes dependency) removed |
+| 2026-07-22 | Combined popup triggers — enable up to two at once (e.g. overlay button + double right-click); “Hotkey only” stays exclusive |
 
 ---
 
@@ -1080,4 +1083,49 @@ An item's position also decides when it ages out: new copies enter at the top,
 and the size limit removes the **bottom-most** unpinned item first — so pushing
 a row down with the ↓ button deliberately moves it to the front of the age-out
 queue.
+
+---
+
+### 🎯 Overlay Placement Rewrite & Combined Triggers (July 2026)
+
+**Status:** ✅ Complete
+
+#### The overlay button positions itself from the cursor
+
+The floating "Paste from ClipDrop" button no longer tries to *detect* the app's
+context menu at all — the whole three-tier detection (the native `#32768` scan,
+the Chromium window heuristic, and the UI-Automation path, which needed the
+`comtypes` dependency) is gone, along with the "first right-click in a fresh app
+misses" lazy-accessibility bug. It now shows **instantly and identically** in
+every app.
+
+Instead it reasons from the **cursor tip**. A Windows context menu is anchored
+at the click and grows into the ONE quadrant with room — down-right by default,
+flipping up and/or left near the bottom / right edges (which is why it seems to
+open in any of four directions). Since the menu fills a single quadrant off the
+tip, the button just sits on the **opposite side** and can't overlap it, no
+measurement needed. It also anchors on Qt's own cursor reading, so it lands
+exactly at the pointer on scaled (125% / 150%) displays.
+
+#### Long menus, and the corners
+
+A menu's *width* is bounded (a few hundred px) but its *height* is not — a long
+menu can span the whole screen, and near a border Windows re-centres it
+vertically on the cursor. So the button clears the menu **horizontally**, which
+holds at any menu height: it sits beside the cursor, or — when the cursor is
+jammed against that edge — just **past the menu's far side**. When an overlap is
+genuinely unavoidable (a rare screen-corner dead-zone), the button is **raised
+to the front**, so it stays visible and clickable over in-page / Chromium menus
+(which hold no mouse capture). A native menu still captures the mouse, so there
+the button is placed clear of it rather than on top.
+
+#### Two triggers at once
+
+Popup triggers are no longer one-or-the-other — you can enable **up to two**
+(Settings → Popup trigger), e.g. **overlay button + double right-click**, and
+switch between whichever is handier mid-workflow. **Hotkey only** stays
+exclusive (it means "no mouse trigger"). Combined triggers coexist cleanly: a
+single right-click shows the overlay while a quick double right-click opens the
+popup directly, and opening the popup by any gesture dismisses a lingering
+overlay so it never sits behind it.
 
