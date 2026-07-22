@@ -833,6 +833,7 @@ class ItemRowWidget(QWidget):
 
         # Left type strip
         type_col = TYPE_COLOURS.get(item.get("type",""), C["accent"])
+        self._type_col = type_col          # strip colour when NOT selected
         self._strip = QFrame(self)
         self._strip.setFixedWidth(3)
         self._strip.setStyleSheet(f"background:{type_col};border:none;")
@@ -970,10 +971,9 @@ class ItemRowWidget(QWidget):
     # ── Background ───────────────────────────────────────────────────────────
 
     def _apply_bg(self, bg_css: str, extra: str = ""):
-        # Selected rows carry an accent outline on top of their tint
-        border = (f"border:1px solid {self.C['accent']};" if self._selected
-                  else "border:none;")
-        self.setStyleSheet(f"background:{bg_css};{border}{extra}")
+        # No box border — selection is shown by the accent LEFT STRIP + tint.
+        # (A border set here bled onto the child labels, boxing the text.)
+        self.setStyleSheet(f"background:{bg_css};border:none;{extra}")
         # Keep labels transparent so row bg shows through
         for lbl in [self._preview_lbl, self._source_lbl, self._thumb]:
             lbl.setStyleSheet(lbl.styleSheet().split(";")[0] + ";background:transparent;")
@@ -987,6 +987,10 @@ class ItemRowWidget(QWidget):
         self._selected = selected
         self._base_bg  = (_hex_lerp(self._orig_base, self.C["accent"], 0.28)
                           if selected else self._orig_base)
+        # The left strip turns solid accent while selected (its normal type
+        # colour otherwise) — a clean marker instead of a box around the text.
+        strip_col = self.C["accent"] if selected else self._type_col
+        self._strip.setStyleSheet(f"background:{strip_col};border:none;")
         # Repaint at the current hover state
         self._on_anim_value(self._anim_t)
 
@@ -1020,7 +1024,8 @@ class ItemRowWidget(QWidget):
         else:
             bg = hovcol
         self._apply_bg(bg)
-        self._strip.setFixedWidth(max(3, int(3 + 7 * t)))
+        base_w = 5 if self._selected else 3   # selected rows keep a bolder strip
+        self._strip.setFixedWidth(max(base_w, int(base_w + 7 * t)))
         tc = _hex_lerp(self.C["text_preview"], self.C["text"], t)
         self._preview_lbl.setStyleSheet(f"color:{tc};background:transparent;")
 
@@ -1436,6 +1441,13 @@ class SidePanelWidget(QWidget):
                 for i in range(self._list.count())
                 if self._list.item(i).isSelected()]
 
+    def _selected_targets(self, fp):
+        """Files a multi-target menu action acts on: the whole side-list
+        selection (snapshotted on right-press) when the right-clicked file is
+        part of it, otherwise just that file."""
+        sel = list(self._sel_at_press)
+        return sel if (fp in sel and len(sel) > 1) else [fp]
+
     def _on_selection_changed(self):
         """Show the header '✕ clear' badge while files are selected."""
         n = len(self._list.selectedItems())
@@ -1655,12 +1667,17 @@ class SidePanelWidget(QWidget):
             # visible entry there; to a named profile, a hidden one.
             profs = self._send_targets()
             if self.controller is not None and self.controller.profiles:
-                sub = menu.addMenu("Send to profile")
+                # Honour the side-list multi-selection: a right-click on a
+                # selected file sends EVERY selected file.
+                n = len(self._selected_targets(fp))
+                sub = menu.addMenu(f"Send {n} files to profile" if n > 1
+                                   else "Send to profile")
                 for prof in profs:
                     act = sub.addAction(prof["name"])
                     act.setData(("send", prof["id"], prof["name"]))
                 sub.addSeparator()
-                sub.addAction("➕  New profile…").setData(
+                sub.addAction(f"➕  New profile with {n} files…" if n > 1
+                              else "➕  New profile…").setData(
                     ("newprofile", None, None))
 
             pin_act = menu.addAction("Unpin" if self._file_is_pinned(fp) else "Pin")
@@ -1718,9 +1735,10 @@ class SidePanelWidget(QWidget):
         elif action == "reveal":
             ctrl.open_path(fp, reveal=True)
         elif action == "send":
-            self._send_file_to_profile(fp, prof_id, prof_name)
+            self._send_files_to_profile(self._selected_targets(fp),
+                                        prof_id, prof_name)
         elif action == "newprofile":
-            self._new_profile_with_file(fp)
+            self._new_profile_with_files(self._selected_targets(fp))
         elif action == "pin":
             self._toggle_file_pin(fp)
         elif action == "delete":
@@ -1728,17 +1746,25 @@ class SidePanelWidget(QWidget):
         elif action == "hide":
             self._hide_files(list(prof_id) if prof_id else [fp])
 
-    def _new_profile_with_file(self, fp: str):
-        """Side-list 'New profile…': prompt for a name, create it, and add
-        this file to it (as its own hidden history entry, like Send-to)."""
+    def _new_profile_with_files(self, fps):
+        """Side-list 'New profile…': prompt for a name, create it, and export
+        every given file to it."""
         ctrl = self.controller
-        if ctrl is None or not ctrl.profiles:
+        if ctrl is None or not ctrl.profiles or not fps:
             return
         name, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
         if not ok or not name.strip():
             return
         pid = ctrl.profiles.create_profile(name.strip())
-        self._send_file_to_profile(fp, pid, name.strip())
+        for fp in reversed(list(fps)):
+            self._send_one_file_to_profile(fp, pid)
+        ctrl._show_toast(f'Created "{name.strip()}" · added {len(fps)} file(s)')
+        self._list.clearSelection()
+        self._sel_at_press = []
+        ctrl._refresh()
+
+    def _new_profile_with_file(self, fp: str):
+        self._new_profile_with_files([fp])
 
     # ── Row rendering (pin-aware) ────────────────────────────────────────────
 
@@ -1797,10 +1823,11 @@ class SidePanelWidget(QWidget):
             return []
         return ctrl.profiles.get_all_profiles()
 
-    def _send_file_to_profile(self, fp: str, profile_id: str, profile_name: str):
-        # A single file sent from a side panel becomes its own file entry
-        # (id = md5 of the path). Named profiles get an INDEPENDENT COPY
-        # (export model); General gets its own visible history entry.
+    def _send_one_file_to_profile(self, fp: str, profile_id: str):
+        """Send ONE file to a profile, no toast/refresh (batch-friendly). A
+        side-panel file becomes its own file entry (id = md5 of the path): a
+        named profile gets an INDEPENDENT COPY (export model); General gets its
+        own visible history entry."""
         ctrl  = self.controller
         hist  = ctrl.history
         fid   = hashlib.md5(fp.encode()).hexdigest()
@@ -1821,8 +1848,26 @@ class SidePanelWidget(QWidget):
             hist._save_history()
         else:
             ctrl.profiles.add_item_to_profile(entry, profile_id)
-        ctrl._show_toast(f'Sent "{os.path.basename(fp)}" to "{profile_name}"')
+
+    def _send_files_to_profile(self, fps, profile_id: str, profile_name: str):
+        """Send one or more selected files to a profile — one toast + one
+        refresh — then clear the side-list selection so it stops highlighting.
+        Sent bottom-to-top so the top row lands on top."""
+        ctrl = self.controller
+        if ctrl is None or not fps:
+            return
+        for fp in reversed(list(fps)):
+            self._send_one_file_to_profile(fp, profile_id)
+        if len(fps) == 1:
+            ctrl._show_toast(f'Sent "{os.path.basename(fps[0])}" to "{profile_name}"')
+        else:
+            ctrl._show_toast(f'Sent {len(fps)} files to "{profile_name}"')
+        self._list.clearSelection()
+        self._sel_at_press = []
         ctrl._refresh()
+
+    def _send_file_to_profile(self, fp: str, profile_id: str, profile_name: str):
+        self._send_files_to_profile([fp], profile_id, profile_name)
 
     def _delete_files(self, fps):
         """Delete one or more content files from this entry, dropping their
@@ -2788,9 +2833,16 @@ class DropdownPopup(QObject):
             if op or rev:
                 menu.addSeparator()
 
+        # A Ctrl+click multi-selection makes the menu act on EVERY selected row
+        # — Send, New profile AND Remove — not just the one right-clicked, as
+        # long as the clicked row is part of that selection.
+        sel   = self._selected_ids
+        multi = item["id"] in sel and len(sel) > 1
+
         # ── Send to profile ──
         if self.profiles:
-            menu.addAction("Send to profile…").setEnabled(False)
+            menu.addAction(f"Send {len(sel)} items to profile…" if multi
+                           else "Send to profile…").setEnabled(False)
             # Every profile EXCEPT the one currently shown (sending an item to
             # the profile you're looking at is a no-op). General included.
             active_id = self.profiles.get_active_profile()["id"]
@@ -2798,12 +2850,10 @@ class DropdownPopup(QObject):
                 if prof["id"] == active_id:
                     continue
                 menu.addAction(prof["name"]).setData(("send", prof["id"]))
-            menu.addAction("➕  New profile…").setData(("newprofile", None))
+            menu.addAction(f"➕  New profile with {len(sel)} items…" if multi
+                           else "➕  New profile…").setData(("newprofile", None))
 
-        # ── Remove ── right-clicking a row inside a Ctrl+click multi-selection
-        # removes every selected row; otherwise it removes just this one.
-        sel = self._selected_ids
-        multi = item["id"] in sel and len(sel) > 1
+        # ── Remove — the whole selection when the clicked row is in it. ──
         if not menu.isEmpty():
             menu.addSeparator()
         menu.addAction(f"Remove {len(sel)} items" if multi else "Remove") \
@@ -2831,9 +2881,15 @@ class DropdownPopup(QObject):
             except Exception as e:
                 print(f"[ClipDrop] Could not open URL: {e}")
         elif action == "send":
-            self._send_item_to_profile(item, value, chosen.text())
+            if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
+                self._send_selected_to_profile(value, chosen.text())
+            else:
+                self._send_item_to_profile(item, value, chosen.text())
         elif action == "newprofile":
-            self._new_profile_with_item(item)
+            if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
+                self._new_profile_with_selected()
+            else:
+                self._new_profile_with_item(item)
         elif action == "delete":
             if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
                 self._delete_selected()
@@ -2854,6 +2910,27 @@ class DropdownPopup(QObject):
         self._show_toast(f'Created "{name.strip()}" · added clip')
         self._refresh()
 
+    def _new_profile_with_selected(self):
+        """Prompt for a name, create the profile, and add EVERY selected clip
+        (bottom-to-top so the top row lands on top)."""
+        if not self.profiles or not self._popup:
+            return
+        ids = set(self._selected_ids)
+        targets = [it for it in self._items_all if it["id"] in ids]
+        if not targets:
+            return
+        _activate_for_menu(self._popup)
+        name, ok = QInputDialog.getText(self._popup, "New Profile",
+                                        "Profile name:")
+        if not ok or not name.strip():
+            return
+        pid = self.profiles.create_profile(name.strip())
+        for it in reversed(targets):
+            self.profiles.add_item_to_profile(it, pid)
+        self._selected_ids.clear()      # done — drop the highlight
+        self._show_toast(f'Created "{name.strip()}" · added {len(targets)} clips')
+        self._refresh()
+
     def _new_profile(self):
         """Create a new empty profile (the header '+' button) and switch to it."""
         if not self.profiles or not self._popup:
@@ -2868,12 +2945,12 @@ class DropdownPopup(QObject):
         self._show_toast(f'Created "{name.strip()}"')
         self._refresh()
 
-    def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
-        """Send a clip to a profile. Named profiles get an INDEPENDENT COPY
-        (export model) — deleting/trimming it there never affects General or
-        any other profile. 'General' is special: it is the live history, so
-        sending there just un-hides the entry if it was a hidden side-panel
-        one."""
+    def _send_one_to_profile(self, item: dict, profile_id: str):
+        """Send ONE clip to a profile WITHOUT toast/refresh (batch-friendly).
+        Named profiles get an INDEPENDENT COPY (export model) — deleting or
+        trimming it there never affects General or any other profile.
+        'General' is the live history, so sending there just un-hides the
+        entry if it was a hidden side-panel one."""
         if profile_id == "general":
             entry = self.history._find_by_id(item["id"])
             if entry is not None and entry.get("hidden"):
@@ -2881,7 +2958,24 @@ class DropdownPopup(QObject):
                 self.history._save_history()
         else:
             self.profiles.add_item_to_profile(item, profile_id)
+
+    def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
+        self._send_one_to_profile(item, profile_id)
         self._show_toast(f'Sent to "{profile_name}"')
+        self._refresh()
+
+    def _send_selected_to_profile(self, profile_id: str, profile_name: str):
+        """Send EVERY Ctrl+click-selected clip to a profile, then refresh once.
+        Sent bottom-to-top so the top row ends up on top (each export inserts
+        at the profile's top)."""
+        ids = set(self._selected_ids)
+        targets = [it for it in self._items_all if it["id"] in ids]
+        if not targets:
+            return
+        for it in reversed(targets):
+            self._send_one_to_profile(it, profile_id)
+        self._selected_ids.clear()      # done — drop the highlight
+        self._show_toast(f'Sent {len(targets)} items to "{profile_name}"')
         self._refresh()
 
     # ── Actions ───────────────────────────────────────────────────────────────
