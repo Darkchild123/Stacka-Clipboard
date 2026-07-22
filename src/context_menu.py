@@ -332,6 +332,12 @@ class ContextMenu:
         threading.Thread(target=find_and_show, daemon=True).start()
 
     def _should_show_overlay(self):
+        # Never offer the "Paste from ClipDrop" overlay while ClipDrop's own
+        # popup is already open — it would float over the app window and
+        # interfere with it. (_popup is a live QWidget while shown, None once
+        # hidden — a cheap, thread-safe attribute read from the hook thread.)
+        if getattr(self.popup, "_popup", None) is not None:
+            return False
         try:
             hwnd = win32gui.GetForegroundWindow()
             wc   = win32gui.GetClassName(hwnd)

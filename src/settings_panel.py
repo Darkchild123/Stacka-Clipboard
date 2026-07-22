@@ -1232,6 +1232,9 @@ class SettingsPanel(QWidget):
                     "History limit must be between 1 and 1000.")
                 return
             self.history.set_limit(value)
+            # Same universal limit applies to every profile — each trims its
+            # own copies independently.
+            self.profiles.enforce_all_limits()
             self._save_feedback.setText("✓  Saved!")
             QTimer.singleShot(2000, lambda: self._save_feedback.setText(""))
         except ValueError:
@@ -1315,22 +1318,12 @@ class SettingsPanel(QWidget):
                 "Others are permanently deleted.\n\nThis cannot be undone.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
-                protected = set()
-                for prof in self.profiles.get_all_profiles():
-                    if not prof.get("built_in"):
-                        protected.update(prof.get("item_ids", []))
-                to_del = [it for it in list(self.history.items) if it["id"] not in protected]
-                for it in to_del:
-                    self.history.delete_item(it["id"])
-                kept = 0
-                for it in self.history.items:
-                    if it["id"] in protected:
-                        it["hidden"] = True; kept += 1
-                if kept:
-                    self.history._save_history()
+                # Export model: named profiles hold their own copies, so
+                # clearing General simply empties the live history.
+                self.history.clear_all()
                 self._refresh_profile_list()
                 QMessageBox.information(self, "Done",
-                    f"General cleared.\n{kept} item(s) kept in named profiles.")
+                    "General cleared.\nNamed profiles keep their own copies.")
         else:
             reply = QMessageBox.question(self, "Clear Profile",
                 f"Clear all items from '{p['name']}'?\n\nItems stay in General.",

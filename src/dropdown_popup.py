@@ -230,6 +230,40 @@ def _menu_hover_should_close(over: bool, st: dict) -> bool:
     return left or stale
 
 
+def _exec_menu_hover_close(menu, global_pos, is_alive=None):
+    """Run menu.exec() but AUTO-DISMISS the menu on hover-out.
+
+    A QMenu normally stays up until an item is chosen or it's clicked away —
+    which, on ClipDrop's frameless no-activate windows, is unreliable and can
+    leave the menu stuck. This closes it when the cursor leaves the menu
+    (after a short grace so submenus stay reachable), when it was opened but
+    never touched, or when is_alive() → False (the owning window went away, so
+    the menu can't orphan on screen). The watchdog QTimer fires INSIDE exec()'s
+    nested loop. Returns the chosen QAction, or None. Used by every ClipDrop
+    context menu — the main list and the side lists — so they all hover-close
+    regardless of the main window's click/hover close-mode setting."""
+    watch = QTimer(menu)
+    st = {"outside": 0, "seen": False, "age": 0}
+
+    def _tick():
+        try:
+            if not menu.isVisible():
+                watch.stop(); return
+            if is_alive is not None and not is_alive():
+                menu.close(); watch.stop(); return
+            if _menu_hover_should_close(_cursor_over_menu(menu), st):
+                menu.close(); watch.stop()
+        except RuntimeError:
+            watch.stop()
+
+    watch.timeout.connect(_tick)
+    watch.start(120)
+    try:
+        return menu.exec(global_pos)
+    finally:
+        watch.stop()
+
+
 def _to_logical(x: int, y: int):
     """Convert PHYSICAL screen pixels (from the mouse hook / pyautogui, both
     DPI-aware) to Qt's LOGICAL pixels used by move()/geometry().
@@ -1345,9 +1379,12 @@ class SidePanelWidget(QWidget):
         self._list.setFixedHeight(max_visible * self.ROW_H)
         self._list.itemClicked.connect(self._on_file_click)
 
-        # Right-click menu per file (Send to profile / Pin / Delete)
-        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._list.customContextMenuRequested.connect(self._show_file_menu)
+        # Right-click menu per file (Send to profile / Pin / Remove). The menu
+        # is opened MANUALLY from the eventFilter (on right-release) with the
+        # built-in policy OFF, so a right-click never changes the selection —
+        # Qt's default was selecting the row, which looked exactly like a
+        # Ctrl+click (row highlighted, "1 selected" shown in the header).
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         # Record which button was pressed: Qt emits itemClicked for ANY
         # mouse button, so without this a right-click would also paste.
         self._list.viewport().installEventFilter(self)
@@ -1376,19 +1413,28 @@ class SidePanelWidget(QWidget):
                 # row on plain press, and itemClicked only fires afterwards.
                 # Without this, "click a selected row → paste all selected"
                 # would always see a single-item selection.
-                self._sel_at_press = [
-                    self._list.item(i).data(Qt.ItemDataRole.UserRole)
-                    for i in range(self._list.count())
-                    if self._list.item(i).isSelected()]
+                self._sel_at_press = self._current_selection_paths()
             elif ev.button() == Qt.MouseButton.RightButton:
-                # Same snapshot for the right-click menu: capture the multi-
-                # selection BEFORE Qt (may) collapse it, so a right-click
-                # Delete can target every selected file.
-                self._sel_at_press = [
-                    self._list.item(i).data(Qt.ItemDataRole.UserRole)
-                    for i in range(self._list.count())
-                    if self._list.item(i).isSelected()]
-        return False   # never consume — just observe
+                # Snapshot the real selection for the menu's multi-target
+                # logic, then CONSUME the press so the view NEVER re-selects.
+                # (Qt was selecting the clicked row on right-press — it looked
+                # like a Ctrl+click: row highlighted, "1 selected" in header.)
+                self._sel_at_press = self._current_selection_paths()
+                return True
+        elif ev.type() == QEvent.Type.MouseButtonRelease:
+            if ev.button() == Qt.MouseButton.RightButton:
+                # Open the context menu ourselves (built-in policy is off).
+                # Deferred so this release finishes before exec()'s loop runs.
+                pos = ev.position().toPoint()
+                QTimer.singleShot(0, lambda p=pos: self._show_file_menu(p))
+                return True
+        return False   # otherwise never consume — just observe
+
+    def _current_selection_paths(self):
+        """The file paths currently selected in the list (display order)."""
+        return [self._list.item(i).data(Qt.ItemDataRole.UserRole)
+                for i in range(self._list.count())
+                if self._list.item(i).isSelected()]
 
     def _on_selection_changed(self):
         """Show the header '✕ clear' badge while files are selected."""
@@ -1586,7 +1632,6 @@ class SidePanelWidget(QWidget):
 
         self._menu_open = True
         self.cancel_close_timer()
-        watch = None
         try:
             menu = QMenu(self)
             self._active_menu = menu
@@ -1648,37 +1693,17 @@ class SidePanelWidget(QWidget):
                        if len(targets) > 1 else "Remove from list")
                 menu.addAction(lbl).setData(("hide", tuple(targets), None))
 
-            # Watchdog — fires INSIDE menu.exec()'s nested loop. A context
-            # menu doesn't dismiss on hover-out, and click-away is unreliable
-            # on the popup's no-activate windows, so it can sit there stuck;
-            # and if the panel or popup is torn down under it, it orphans on
-            # screen. This closes the menu when the cursor leaves it (after a
-            # short grace so submenus stay reachable), when it's been opened
-            # but never touched, or when the panel/popup goes away.
-            watch = QTimer(menu)
-            st = {"outside": 0, "seen": False, "age": 0}
-
-            def _watch_tick():
-                try:
-                    if not menu.isVisible():
-                        watch.stop(); return
-                    popup = self._parent_popup
-                    if (not self.isVisible() or
-                            (popup is not None and not popup.isVisible())):
-                        menu.close(); watch.stop(); return   # torn down → no orphan
-                    if _menu_hover_should_close(_cursor_over_menu(menu), st):
-                        menu.close(); watch.stop()
-                except RuntimeError:
-                    watch.stop()
-
-            watch.timeout.connect(_watch_tick)
-            watch.start(120)
-
+            # Auto-dismiss on hover-out / teardown (a context menu won't do
+            # that itself; on these no-activate windows click-away is
+            # unreliable, so it can sit stuck — or orphan if the panel/popup
+            # closes under it). See _exec_menu_hover_close.
             _activate_for_menu(self)   # menu needs an ACTIVE owner to grab
-            chosen = menu.exec(self._list.viewport().mapToGlobal(pos))
+            popup = self._parent_popup
+            chosen = _exec_menu_hover_close(
+                menu, self._list.viewport().mapToGlobal(pos),
+                is_alive=lambda: self.isVisible() and
+                (popup is None or popup.isVisible()))
         finally:
-            if watch is not None:
-                watch.stop()
             self._active_menu = None
             self._menu_open = False
             # Re-arm the leave-close only if the cursor has left the panel
@@ -1773,28 +1798,29 @@ class SidePanelWidget(QWidget):
         return ctrl.profiles.get_all_profiles()
 
     def _send_file_to_profile(self, fp: str, profile_id: str, profile_name: str):
-        # Single files sent to a profile become their own history entries
-        # (id = md5 of path). Named profiles keep them hidden from General;
-        # sending to GENERAL itself un-hides the entry instead.
+        # A single file sent from a side panel becomes its own file entry
+        # (id = md5 of the path). Named profiles get an INDEPENDENT COPY
+        # (export model); General gets its own visible history entry.
         ctrl  = self.controller
         hist  = ctrl.history
         fid   = hashlib.md5(fp.encode()).hexdigest()
-        entry = hist._find_by_id(fid)
-        if entry is None:
-            entry = {
-                "id":      fid,
-                "type":    "file",
-                "content": [fp],
-                "source":  os.path.dirname(fp),
-                "pinned":  False,
-                "hidden":  True,
-            }
-            hist.items.insert(0, entry)
+        entry = {
+            "id":      fid,
+            "type":    "file",
+            "content": [fp],
+            "source":  os.path.dirname(fp),
+            "pinned":  False,
+        }
         if profile_id == "general":
-            entry["hidden"] = False
+            existing = hist._find_by_id(fid)
+            if existing is None:
+                hist.items.insert(0, entry)
+                hist._enforce_limit()      # keep General within its limit
+            else:
+                existing.pop("hidden", None)   # un-hide an existing entry
+            hist._save_history()
         else:
-            ctrl.profiles.add_item_to_profile(fid, profile_id)
-        hist._save_history()
+            ctrl.profiles.add_item_to_profile(entry, profile_id)
         ctrl._show_toast(f'Sent "{os.path.basename(fp)}" to "{profile_name}"')
         ctrl._refresh()
 
@@ -2786,7 +2812,11 @@ class DropdownPopup(QObject):
         if menu.isEmpty():
             return
         _activate_for_menu(self._popup)   # menu needs an ACTIVE owner to grab
-        chosen = menu.exec(gpos)
+        # Hover-out auto-dismiss, same as the side lists — context menus
+        # always hover-close, regardless of the main window's close-mode.
+        chosen = _exec_menu_hover_close(
+            menu, gpos,
+            is_alive=lambda: bool(self._popup) and self._popup.isVisible())
         data = chosen.data() if chosen else None
         if not data:
             return
@@ -2820,7 +2850,7 @@ class DropdownPopup(QObject):
         if not ok or not name.strip():
             return
         pid = self.profiles.create_profile(name.strip())
-        self.profiles.add_item_to_profile(item["id"], pid)
+        self.profiles.add_item_to_profile(item, pid)
         self._show_toast(f'Created "{name.strip()}" · added clip')
         self._refresh()
 
@@ -2839,17 +2869,18 @@ class DropdownPopup(QObject):
         self._refresh()
 
     def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
-        """Send a history item to a profile. 'General' is special: it is
-        simply the un-hidden history list, so sending there means clearing
-        the item's hidden flag (set when side-panel files become their own
-        entries)."""
+        """Send a clip to a profile. Named profiles get an INDEPENDENT COPY
+        (export model) — deleting/trimming it there never affects General or
+        any other profile. 'General' is special: it is the live history, so
+        sending there just un-hides the entry if it was a hidden side-panel
+        one."""
         if profile_id == "general":
             entry = self.history._find_by_id(item["id"])
             if entry is not None and entry.get("hidden"):
                 entry["hidden"] = False
                 self.history._save_history()
         else:
-            self.profiles.add_item_to_profile(item["id"], profile_id)
+            self.profiles.add_item_to_profile(item, profile_id)
         self._show_toast(f'Sent to "{profile_name}"')
         self._refresh()
 
@@ -2867,25 +2898,15 @@ class DropdownPopup(QObject):
         self._refresh()
 
     def _delete_one(self, item: dict):
-        """Remove a single item from the active view WITHOUT refreshing, so a
-        multi-delete can drop every selected row and repaint just once."""
+        """Remove a single item from the ACTIVE list only — WITHOUT refreshing,
+        so a multi-delete can drop every selected row and repaint just once.
+
+        In the export model each list owns its own copies, so removing here
+        never affects the same item held by another profile or by General."""
         if self.profiles:
             active = self.profiles.get_active_profile()
             if active["id"] == "general":
-                in_named = any(
-                    item["id"] in p.get("item_ids", [])
-                    for p in self.profiles.get_all_profiles()
-                    if not p.get("built_in")
-                )
-                if in_named:
-                    for it in self.history.items:
-                        if it["id"] == item["id"]:
-                            it["hidden"] = True
-                            self.history._save_history()
-                            break
-                else:
-                    self.profiles.remove_item_from_all(item["id"])
-                    self.history.delete_item(item["id"])
+                self.history.delete_item(item["id"])
             else:
                 self.profiles.remove_item_from_profile(item["id"], active["id"])
         else:
@@ -2907,10 +2928,25 @@ class DropdownPopup(QObject):
         self._refresh()
 
     def _move_up(self, item: dict):
+        # Reorder within the ACTIVE list only. A named profile owns its copies,
+        # so reordering there must not shuffle General (as the old shared model
+        # did) — route the move to the profile's own item list.
+        if self.profiles:
+            active = self.profiles.get_active_profile()
+            if active["id"] != "general":
+                self.profiles.move_item_up(item["id"], active["id"])
+                self._refresh()
+                return
         self.history.move_up(item["id"])
         self._refresh()
 
     def _move_down(self, item: dict):
+        if self.profiles:
+            active = self.profiles.get_active_profile()
+            if active["id"] != "general":
+                self.profiles.move_item_down(item["id"], active["id"])
+                self._refresh()
+                return
         self.history.move_down(item["id"])
         self._refresh()
 
