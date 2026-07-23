@@ -211,14 +211,14 @@ def _cursor_over_menu(menu) -> bool:
     return False
 
 
-def _menu_hover_should_close(over: bool, st: dict) -> bool:
-    """One tick of the side-list context-menu hover-out watchdog.
+def _menu_hover_should_close(over: bool, st: dict, stale_ticks: int = 8) -> bool:
+    """One tick of the context-menu hover-out watchdog (120 ms per tick).
 
     `st` carries {'outside','seen','age'} across ticks (mutated in place).
     Returns True when the menu should close: the cursor LEFT it after having
-    been on it (a ~3-tick grace so a submenu is reachable), or the menu was
-    opened but NEVER touched (a ~8-tick settle, e.g. it popped up off-cursor
-    near a screen edge and was abandoned)."""
+    been on it (a 3-tick grace ≈ 360 ms so a submenu is reachable), or the menu
+    was opened but NEVER touched (stale_ticks ticks — default 8 ≈ 960 ms; the
+    side-list menu passes 4 ≈ 500 ms)."""
     st["age"] += 1
     if over:
         st["seen"] = True
@@ -226,11 +226,11 @@ def _menu_hover_should_close(over: bool, st: dict) -> bool:
         return False
     st["outside"] += 1
     left  = st["seen"] and st["outside"] >= 3
-    stale = (not st["seen"]) and st["age"] >= 8
+    stale = (not st["seen"]) and st["age"] >= stale_ticks
     return left or stale
 
 
-def _exec_menu_hover_close(menu, global_pos, is_alive=None):
+def _exec_menu_hover_close(menu, global_pos, is_alive=None, stale_ticks=8):
     """Run menu.exec() but AUTO-DISMISS the menu on hover-out.
 
     A QMenu normally stays up until an item is chosen or it's clicked away —
@@ -251,7 +251,7 @@ def _exec_menu_hover_close(menu, global_pos, is_alive=None):
                 watch.stop(); return
             if is_alive is not None and not is_alive():
                 menu.close(); watch.stop(); return
-            if _menu_hover_should_close(_cursor_over_menu(menu), st):
+            if _menu_hover_should_close(_cursor_over_menu(menu), st, stale_ticks):
                 menu.close(); watch.stop()
         except RuntimeError:
             watch.stop()
@@ -1719,7 +1719,8 @@ class SidePanelWidget(QWidget):
             chosen = _exec_menu_hover_close(
                 menu, self._list.viewport().mapToGlobal(pos),
                 is_alive=lambda: self.isVisible() and
-                (popup is None or popup.isVisible()))
+                (popup is None or popup.isVisible()),
+                stale_ticks=4)     # side-list menu: ~500 ms untouched-close
         finally:
             self._active_menu = None
             self._menu_open = False
@@ -2948,14 +2949,12 @@ class DropdownPopup(QObject):
     def _send_one_to_profile(self, item: dict, profile_id: str):
         """Send ONE clip to a profile WITHOUT toast/refresh (batch-friendly).
         Named profiles get an INDEPENDENT COPY (export model) — deleting or
-        trimming it there never affects General or any other profile.
-        'General' is the live history, so sending there just un-hides the
-        entry if it was a hidden side-panel one."""
+        trimming it there never affects General or any other profile. Sending
+        to General adds the clip to the live history (or un-hides it if it's
+        already there) — a profile copy can outlive the General original it
+        was made from, so an un-hide alone would silently do nothing."""
         if profile_id == "general":
-            entry = self.history._find_by_id(item["id"])
-            if entry is not None and entry.get("hidden"):
-                entry["hidden"] = False
-                self.history._save_history()
+            self.history.add_existing(item)
         else:
             self.profiles.add_item_to_profile(item, profile_id)
 

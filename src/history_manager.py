@@ -84,6 +84,49 @@ class HistoryManager:
         self._save_history()
 
 
+    def add_existing(self, item):
+        """
+        Insert an ALREADY-FORMED item as a new General entry — used when a clip
+        is sent to General from a named profile.
+
+        A profile keeps INDEPENDENT copies (export model), so a profile clip
+        can outlive its General original (which ages out of the size limit).
+        Sending it to General must therefore ADD it, not just un-hide.
+
+        Unlike add_item (which saves a raw PIL image), the image content here
+        is a FILE PATH, so it's COPIED into General's own images folder to
+        survive the source profile later being deleted. If the item is already
+        in General it's simply un-hidden (deduped).
+        """
+        import shutil
+        import copy as _copy
+
+        existing = self._find_by_id(item["id"])
+        if existing is not None:
+            if existing.get("hidden"):
+                existing["hidden"] = False
+                self._save_history()
+            return
+
+        it = _copy.deepcopy(item)
+        it.pop("hidden", None)
+        it["pinned"] = False
+        if it.get("type") == "image":
+            src = it.get("content")
+            if src and os.path.exists(src):
+                dst = os.path.join(IMAGES_DIR, f"{it['id']}.png")
+                try:
+                    if os.path.abspath(src) != os.path.abspath(dst):
+                        shutil.copy2(src, dst)
+                    it["content"] = dst
+                except Exception as e:
+                    print(f"Failed to copy image into General: {e}")
+
+        self.items.insert(0, it)
+        self._enforce_limit()
+        self._save_history()
+
+
     # ============================================================
     # GETTING ITEMS
     # ============================================================
