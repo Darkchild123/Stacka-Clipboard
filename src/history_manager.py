@@ -160,6 +160,13 @@ class HistoryManager:
         - File: file name(s)
         - Image: "📷 Image"
         """
+        if item["type"] == "card":
+            # NEVER the real number — the masked form only. The full PAN lives
+            # encrypted in item["content"]; brand/last4 are the safe cleartext.
+            brand = item.get("brand", "Card")
+            last4 = item.get("last4", "••••")
+            return f"{brand} •••• {last4}"
+
         if item["type"] == "url":
             url = item["content"].strip()
             return url[:120] + "..." if len(url) > 120 else url

@@ -91,6 +91,7 @@ TYPE_COLOURS = {
     "python": "#4B8BBE",
     "bash":   "#16a34a",
     "image":  "#0891b2",
+    "card":   "#059669",
 }
 
 _FILE_TYPE_MAP = {}
@@ -509,6 +510,13 @@ ICON_SVGS = {
    '<g fill="none" stroke="#fff" stroke-width="6"><circle cx="64" cy="64" r="34"/>'
    '<ellipse cx="64" cy="64" rx="15" ry="34"/><line x1="30" y1="64" x2="98" y2="64"/>'
    '<line x1="39" y1="46" x2="89" y2="46" stroke-width="5"/><line x1="39" y1="82" x2="89" y2="82" stroke-width="5"/></g></svg>',
+
+ "card": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#059669") +
+   '<rect x="24" y="40" width="80" height="50" rx="7" fill="#f8fafc"/>'
+   '<rect x="24" y="50" width="80" height="11" fill="#334155"/>'
+   '<rect x="33" y="70" width="20" height="13" rx="2.5" fill="#fbbf24" stroke="#b45309" stroke-width="1.5"/>'
+   '<g fill="#94a3b8"><rect x="60" y="73" width="34" height="4" rx="2"/>'
+   '<rect x="72" y="82" width="22" height="4" rx="2"/></g></svg>',
 }
 ICON_SVGS["default"] = ICON_SVGS["file"]
 
@@ -2134,6 +2142,16 @@ class _PasteWorker(QThread):
                 if self._watch:
                     self._watch.last_seen = hashlib.md5(
                         item["content"].encode("utf-8", errors="ignore")).hexdigest()
+            elif item["type"] == "card":
+                # Decrypt the real number ONLY here, in memory, to paste it.
+                import card_detect
+                number = card_detect.decrypt(item["content"])
+                if not number:
+                    raise ValueError("Could not decrypt the saved card number")
+                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, number)
+                if self._watch:
+                    self._watch.last_seen = hashlib.md5(
+                        number.encode("utf-8", errors="ignore")).hexdigest()
             elif item["type"] == "file":
                 files = item["content"]
                 if isinstance(files, list):

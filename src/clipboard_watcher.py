@@ -133,6 +133,29 @@ class ClipboardWatcher:
             if content is None:
                 return
 
+        # --- Credit-card detection (whole clipboard is a card) ---
+        # The real number is encrypted at rest (DPAPI) and never stored in the
+        # clear. Only taken over if encryption succeeds — otherwise it falls
+        # through and is saved as ordinary text rather than being lost.
+        if content_type in ("text", "url", "code", "bash", "hex") and isinstance(content, str):
+            import card_detect
+            card = card_detect.detect_card(content)
+            if card:
+                enc = card_detect.encrypt(card["number"])
+                if enc:
+                    import uuid
+                    self.history.add_item({
+                        "id":      str(uuid.uuid4()),   # random — NEVER a hash of the number
+                        "type":    "card",
+                        "content": enc,                 # ciphertext, not the number
+                        "brand":   card["brand"],
+                        "last4":   card["last4"],
+                        "source":  source,
+                        "pinned":  False,
+                    })
+                    print(f"New item captured: [card] {card['brand']} ****{card['last4']}")
+                    return
+
         # Build a clipboard item as a dictionary
         # Think of a dictionary like a labelled container with named slots
         item = {

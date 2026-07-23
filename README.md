@@ -213,6 +213,7 @@ ClipDrop/
 - [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
 - [x] SVG icon system with selectable icon packs and per-extension detection
 - [x] Adjustable UI sizing (window, rows, side list) in 10% steps
+- [x] Credit card detection — masked display, encrypted at rest (Windows DPAPI)
 - [x] Open files / folders / links straight from the list (right-click)
 
 ### Future Ideas (v2+)
@@ -446,6 +447,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-22 | Independent profiles — sending a clip to a profile stores its own copy, so trimming, deleting or reordering in one list never affects another; each profile trims to the shared size limit independently, with automatic migration of existing profiles |
 | 2026-07-22 | Overlay button rewritten to position from the cursor — sits opposite the menu's growth quadrant and escapes past long / re-centred menus, raising above in-page menus when overlap is unavoidable; the three-tier menu detection (and the comtypes dependency) removed |
 | 2026-07-22 | Combined popup triggers — enable up to two at once (e.g. overlay button + double right-click); “Hotkey only” stays exclusive |
+| 2026-07-22 | Credit card detection (whole-clipboard) — regex + BIN/brand + Luhn checksum identify a copied card; the list shows a masked “Visa •••• 4242”, the real number is DPAPI-encrypted at rest and only decrypted in memory to paste |
 
 ---
 
@@ -1128,4 +1130,49 @@ exclusive (it means "no mouse trigger"). Combined triggers coexist cleanly: a
 single right-click shows the overlay while a quick double right-click opens the
 popup directly, and opening the popup by any gesture dismisses a lingering
 overlay so it never sits behind it.
+
+---
+
+### 💳 Credit Card Detection (July 2026)
+
+**Status:** ✅ Complete (whole-clipboard only — detecting a card embedded
+inside a larger paste is a planned follow-up)
+
+Credit and debit card numbers are highly structured, so ClipDrop identifies
+them **entirely locally** — no AI, no network call — using three checks that
+must ALL agree:
+
+1. **Regex** — the copied text is 13–19 digits (spaces or dashes between
+   groups are fine).
+2. **BIN + length** — the leading digits and the total length match a real
+   card network's issuing range (Visa, Mastercard, Amex, Discover, JCB,
+   Diners, UnionPay).
+3. **Luhn checksum** — the mod-10 formula every card network uses to catch
+   typos, run against the digits.
+
+Requiring all three (not Luhn alone, which ~1 in 10 random digit strings pass)
+makes it very unlikely that an order number, tracking number, or ID gets
+mistaken for a card.
+
+#### Handled like the sensitive data it is
+
+Once ClipDrop recognises a card, it treats it differently from ordinary text:
+
+- **Masked everywhere it's shown** — the list displays `Visa •••• 4242`, never
+  the real digits, with its own green card icon.
+- **Encrypted at rest** — the actual number is protected with Windows'
+  built-in **DPAPI** (tied to the Windows user account, no separate password)
+  before it ever touches `history.json`. The file only ever contains
+  ciphertext plus the brand and last four digits.
+- **Decrypted only in memory to paste** — the real number is recovered for the
+  instant it's written to the clipboard for `Ctrl+V`, then discarded.
+- **No hash-based ID** — every other item is keyed by a content hash; a card
+  gets a random ID instead, since a hash of a card number is brute-forceable
+  from the small space of valid card numbers.
+
+Scope for this pass: detection fires when the **entire** copied text is a
+single card number, mirroring how hex-colour detection already works. Catching
+a card number embedded inside a larger paste (an order-confirmation email, for
+example) is intentionally left for a follow-up, since masking and encrypting
+just part of a longer text is a bigger design problem on its own.
 
