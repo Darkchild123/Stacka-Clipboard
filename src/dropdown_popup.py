@@ -128,6 +128,35 @@ for _e in ['.js','.ts','.jsx','.tsx','.java','.c','.cpp','.h','.cs',
 # One is a file on disk, the other is a character run. Never merge them.
 for _e in ['.txt','.rtf','.md','.log','.ini','.cfg','.conf','.json','.xml','.yaml','.yml','.toml']:
     _FILE_TYPE_MAP[_e] = "txt"
+# App/file shortcuts (.lnk) get their own distinct "escape the frame" arrow
+# icon — kept separate from "url" (the chain-link icon) so a Windows shortcut
+# never looks like a web link. Internet shortcut files (.url, .webloc) ARE
+# links, so they reuse the existing "url" icon on purpose.
+for _e in ['.lnk']:
+    _FILE_TYPE_MAP[_e] = "shortcut"
+for _e in ['.url', '.webloc']:
+    _FILE_TYPE_MAP[_e] = "url"
+# 3D models & CAD. Requested formats, plus their common drawing/assembly
+# variants and other widely-used 3D formats not in the original list —
+# meshes (STL/OBJ/PLY/3MF/AMF/glTF/COLLADA/VRML-X3D/U3D), CAD (STEP/IGES/
+# Parasolid/SAT/JT), MCAD packages (SolidWorks/Inventor/CATIA), AEC (Revit/
+# IFC), DXF/DWG, and a few common 3D-suite native formats (Blender/Maya/
+# 3ds Max/Cinema4D/LightWave/Rhino/SketchUp/FreeCAD/OpenSCAD), plus G-code.
+for _e in ['.step', '.stp', '.igs', '.iges', '.stl', '.3mf', '.obj', '.fbx',
+           '.dwg', '.dxf',
+           '.sldprt', '.sldasm', '.slddrw',
+           '.ipt', '.iam', '.idw', '.ipn',
+           '.catpart', '.catproduct', '.catdrawing',
+           '.x_t', '.x_b',
+           '.3dm', '.skp', '.blend',
+           '.gltf', '.glb', '.dae',
+           '.rvt', '.rfa', '.rte',
+           '.ifc',
+           '.gcode', '.gco',
+           '.ply', '.amf', '.wrl', '.x3d', '.u3d',
+           '.ma', '.mb', '.c4d', '.lwo', '.3ds', '.max',
+           '.scad', '.fcstd', '.sat', '.jt']:
+    _FILE_TYPE_MAP[_e] = "model3d"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -495,6 +524,30 @@ ICON_SVGS = {
  "folder": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">'
    '<path d="M16 34 a8 8 0 0 1 8-8 h26 l12 12 h40 a8 8 0 0 1 8 8 v10 H16 z" fill="#d97706"/>'
    '<path d="M16 46 h96 v50 a8 8 0 0 1-8 8 H24 a8 8 0 0 1-8-8 z" fill="#fbbf24"/></svg>',
+
+ # Wireframe cube of vertices + edges — the standard "3D model" glyph,
+ # matching the reference image. A distinct navy tile so it never reads as
+ # the (differently shaped, differently coloured) "url" chain-link icon.
+ "model3d": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#1e3a8a") +
+   '<g fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">'
+   '<path d="M64 22 L36 40 M64 22 L92 40 M36 40 L24 64 M92 40 L104 64 '
+   'M24 64 L36 88 M104 64 L92 88 M36 88 L64 106 M92 88 L64 106 '
+   'M36 40 L64 64 M92 40 L64 64 M64 64 L64 106"/></g>'
+   '<g fill="#fff">'
+   '<circle cx="64" cy="22" r="9"/><circle cx="36" cy="40" r="9"/><circle cx="92" cy="40" r="9"/>'
+   '<circle cx="24" cy="64" r="9"/><circle cx="104" cy="64" r="9"/>'
+   '<circle cx="36" cy="88" r="9"/><circle cx="92" cy="88" r="9"/>'
+   '<circle cx="64" cy="106" r="9"/><circle cx="64" cy="64" r="9"/></g></svg>',
+
+ # A rounded bracket, open at the top-right, with a bold arrow breaking OUT
+ # through that gap — the classic "shortcut / jump-to" glyph. Deliberately a
+ # different shape AND colour (neutral slate) from "url"'s blue chain-link,
+ # so a Windows .lnk shortcut never reads as a web link.
+ "shortcut": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#64748b") +
+   '<path d="M76 40 H50 a14 14 0 0 0-14 14 v34 a14 14 0 0 0 14 14 h34 a14 14 0 0 0 14-14 V76" '
+   'fill="none" stroke="#fff" stroke-width="10" stroke-linecap="round"/>'
+   '<path d="M60 68 L96 32 M72 30 h24 v24" fill="none" stroke="#fff" stroke-width="10" '
+   'stroke-linecap="round" stroke-linejoin="round"/></svg>',
 
  "code": '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">' + _TILE.format(c="#6d28d9") +
    '<g fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">'

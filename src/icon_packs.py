@@ -96,14 +96,47 @@ LABELED = {
  "dmg":   ('<path d="M15.5 12.5c0-1.5 1-2 1-2s-1-.2-1.5.5c-.5.6-.3 1.5-.3 1.5s.8.2 1-.5zm.5 1.5c-1 0-2 .5-2 1.5s1 1.5 2 1.5 2-.5 2-1.5-1-1.5-2-1.5z" fill="#1F2937"/>', "DMG", "#1F2937"),
  "iso":   ('<circle cx="16" cy="15" r="4.5" fill="none" stroke="#78350F" stroke-width="1.5"/><circle cx="16" cy="15" r="1.5" fill="none" stroke="#78350F" stroke-width="1.25"/>', "ISO", "#78350F"),
  "app":   ('<polygon points="16 11 21 13.5 21 18.5 16 21 11 18.5 11 13.5" fill="none" stroke="#2563EB" stroke-width="1.25" stroke-linejoin="round"/><line x1="16" y1="11" x2="16" y2="21" stroke="#2563EB" stroke-width="1.25"/><line x1="11" y1="13.5" x2="16" y2="16" stroke="#2563EB" stroke-width="1.25"/><line x1="21" y1="13.5" x2="16" y2="16" stroke="#2563EB" stroke-width="1.25"/>', "APP", "#2563EB"),
+ "lnk":   ('<circle cx="14" cy="19" r="5" fill="#fff" stroke="#64748B" stroke-width="1.25"/><path d="M12 21l5-5m-3.5 0h3.5v3.5" fill="none" stroke="#334155" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>', "LNK", "#64748B"),
 }
+
+# 3D models & CAD — one shared "wireframe cube" glyph (same family as the
+# "app" hexagon above, just its own colour), reused across every format so
+# the whole category reads as one visual family; only the badge text (the
+# real extension) differs per entry.
+_M3D_GLYPH = ('<polygon points="16 10 21 13 21 19 16 22 11 19 11 13" '
+              'fill="none" stroke="#1E3A8A" stroke-width="1.4" stroke-linejoin="round"/>'
+              '<path d="M11 13l5 3 5-3M16 16v6" fill="none" stroke="#1E3A8A" '
+              'stroke-width="1.2" stroke-linejoin="round"/>')
+_M3D_COL = "#1E3A8A"
+
+for _ext, _badge in [
+    ("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("3mf", "3MF"),
+    ("obj", "OBJ"), ("fbx", "FBX"), ("dwg", "DWG"), ("dxf", "DXF"),
+    ("sldprt", "SLDPRT"), ("sldasm", "SLDASM"), ("slddrw", "SLDDRW"),
+    ("ipt", "IPT"), ("iam", "IAM"), ("idw", "IDW"), ("ipn", "IPN"),
+    ("catpart", "CATPART"), ("catproduct", "CATPRODUCT"), ("catdrawing", "CATDRAWING"),
+    ("x_t", "X_T"), ("x_b", "X_B"),
+    ("3dm", "3DM"), ("skp", "SKP"), ("blend", "BLEND"),
+    ("gltf", "GLTF"), ("glb", "GLB"), ("dae", "DAE"),
+    ("rvt", "RVT"), ("rfa", "RFA"), ("rte", "RTE"),
+    ("ifc", "IFC"), ("gcode", "GCODE"),
+    ("ply", "PLY"), ("amf", "AMF"), ("wrl", "WRL"), ("x3d", "X3D"), ("u3d", "U3D"),
+    ("ma", "MA"), ("mb", "MB"), ("c4d", "C4D"), ("lwo", "LWO"),
+    ("3ds", "3DS"), ("max", "MAX"),
+    ("scad", "SCAD"), ("fcstd", "FCSTD"), ("sat", "SAT"), ("jt", "JT"),
+]:
+    LABELED[_ext] = (_M3D_GLYPH, _badge, _M3D_COL)
 
 # Secondary extensions that share an icon
 _ALIASES = {
  "doc": "docx", "xls": "xlsx", "ppt": "pptx", "jpeg": "jpg",
  "htm": "html", "scss": "css", "tar": "gz", "tgz": "gz", "sys": "dll",
  "mpeg": "mp4", "m4v": "mp4", "wma": "wmv", "m4a": "mp3", "ogg": "mp3",
+ "stp": "step", "igs": "iges", "gco": "gcode",   # true format-variant extensions
 }
+# NOTE: .url / .webloc (internet shortcuts) are deliberately NOT aliased here
+# — they fall through to the Default pack's "url" icon (see dropdown_popup.py
+# _FILE_TYPE_MAP), so they read as links, never as an app shortcut.
 
 
 def _extract(size: int, ext: str):
