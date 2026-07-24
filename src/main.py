@@ -35,6 +35,17 @@ def _set_dpi_awareness():
         pass
 _set_dpi_awareness()
 
+
+def _set_app_user_model_id():
+    # Windows: give the process its own taskbar identity so it shows ClipDrop's
+    # icon (not the Python launcher's) and pins / groups as its own app.
+    import ctypes
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cosmas.ClipDrop")
+    except Exception:
+        pass
+_set_app_user_model_id()
+
 # Silence benign DirectWrite font warnings: Qt's glyph fallback (emoji in
 # labels) enumerates legacy Windows BITMAP fonts (8514oem, Fixedsys) that
 # DirectWrite cannot load. Text renders fine via the next fallback — the
@@ -43,6 +54,7 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import Qt
+from PyQt6.QtGui     import QIcon
 
 from clipboard_watcher import ClipboardWatcher
 from history_manager   import HistoryManager
@@ -74,6 +86,17 @@ def main():
     # Step 1: QApplication — must exist before any QWidget is created
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)   # keep running after popup closes
+
+    # App-wide window icon — taskbar, Alt+Tab, and every window's title bar.
+    # Prefer the multi-size .ico (Windows picks the crispest per context),
+    # fall back to the PNG.
+    _assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "assets")
+    for _name in ("clipdrop.ico", "icon.png"):
+        _p = os.path.join(_assets, _name)
+        if os.path.exists(_p):
+            app.setWindowIcon(QIcon(_p))
+            break
 
     # Step 2: History Manager
     history = HistoryManager()

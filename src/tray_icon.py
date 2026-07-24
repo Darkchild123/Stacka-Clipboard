@@ -49,8 +49,13 @@ class TrayIcon:
     # ── Create tray ──────────────────────────────────────────────────────────
 
     def _create_tray(self):
-        pixmap = _pil_to_qpixmap(self._icon_img)
-        icon   = QIcon(pixmap)
+        # Prefer the multi-size .ico (crisp at the small tray sizes); fall back
+        # to the PIL-loaded icon.png / generated placeholder.
+        ico = os.path.join(BASE_DIR, "assets", "clipdrop.ico")
+        if os.path.exists(ico):
+            icon = QIcon(ico)
+        else:
+            icon = QIcon(_pil_to_qpixmap(self._icon_img))
 
         self._tray = QSystemTrayIcon(icon)
         self._tray.setToolTip("ClipDrop")
