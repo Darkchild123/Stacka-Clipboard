@@ -5,8 +5,6 @@
 # Opened from the system tray icon menu.
 # ============================================================
 
-import webbrowser
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QSlider,
@@ -19,13 +17,14 @@ from PyQt6.QtGui     import QFont, QIntValidator, QCursor, QKeySequence
 
 import math
 
-from donate import DONATE_URL
+from donate import DONATE_URL, open_donation_page
 
 APP_NAME    = "ClipDrop"
 APP_VERSION = "1.0.0"
 APP_AUTHOR  = "Cosmas Nwachukwu"
 APP_EMAIL   = "finecosmas@gmail.com"
 GITHUB_URL  = "https://github.com/Darkchild123/Project-ClipDrop"
+GITHUB_PROFILE_URL = "https://github.com/Darkchild123"
 
 DARK = {
     "bg":           "#1e1e2e",
@@ -1171,28 +1170,33 @@ class SettingsPanel(QWidget):
             rl.addWidget(lbl); rl.addWidget(val); rl.addStretch()
             lay.addWidget(row)
 
-        # GitHub link
-        row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
-        rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0)
-        lbl = QLabel("GitHub:", row)
-        lbl.setFixedWidth(80)
-        lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
-        link = QLabel(f'<a href="{GITHUB_URL}" style="color:{C["accent_hover"]};">{GITHUB_URL}</a>', row)
-        link.setOpenExternalLinks(True)
-        link.setTextFormat(Qt.TextFormat.RichText)
-        link.setStyleSheet("background:transparent;")
-        rl.addWidget(lbl); rl.addWidget(link); rl.addStretch()
-        lay.addWidget(row)
+        # Link rows — Source = this repo (issues, code, licence, releases),
+        # Developer = the profile where the rest of Cosmas's projects live.
+        def _link_row(label, url):
+            row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
+            rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0)
+            lbl = QLabel(label, row)
+            lbl.setFixedWidth(80)
+            lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+            link = QLabel(f'<a href="{url}" style="color:{C["accent_hover"]};">{url}</a>', row)
+            link.setOpenExternalLinks(True)
+            link.setTextFormat(Qt.TextFormat.RichText)
+            link.setStyleSheet("background:transparent;")
+            rl.addWidget(lbl); rl.addWidget(link); rl.addStretch()
+            lay.addWidget(row)
+
+        _link_row("Source:", GITHUB_URL)
+        _link_row("Developer:", GITHUB_PROFILE_URL)
 
         # ── Support / donation button ──────────────────────────────────────────
         # A warm rose face so it stands out from the indigo chrome and reads as
         # a "support" action, not another settings control. Opens the Paystack
-        # page in the default browser (webbrowser — same as the popup footer).
+        # page via the shared open_donation_page() helper (same as the footer).
         lay.addSpacing(8)
-        donate = QPushButton("❤  Support ClipDrop", w)
+        donate = QPushButton("🎁  Support ClipDrop", w)
         donate.setCursor(Qt.CursorShape.PointingHandCursor)
         donate.setStyleSheet(_btn_style("#e11d6b", "#ec4899"))
-        donate.clicked.connect(lambda: webbrowser.open(DONATE_URL))
+        donate.clicked.connect(lambda: open_donation_page())
         lay.addWidget(donate)
         return w
 

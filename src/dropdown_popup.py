@@ -23,7 +23,7 @@ import hashlib
 import subprocess
 import webbrowser
 
-from donate import DONATE_URL
+from donate import DONATE_URL, open_donation_page
 
 import win32clipboard
 import win32con
@@ -2471,12 +2471,12 @@ class DropdownPopup(QObject):
         fl.setSpacing(6)
         credit = QLabel("Made by Cosmas", footer)
         credit.setStyleSheet(f"color:{C['text_dim']};background:transparent;font-size:11px;")
-        support = QLabel("❤ Support", footer)
+        support = QLabel("🎁 Support", footer)
         support.setStyleSheet(
-            "color:#e11d6b;background:transparent;font-size:11px;font-weight:bold;")
+            "color:#e11d6b;background:transparent;font-size:12px;font-weight:900;")
         support.setCursor(Qt.CursorShape.PointingHandCursor)
         support.setToolTip("Support ClipDrop's development")
-        support.mousePressEvent = lambda e: webbrowser.open(DONATE_URL)
+        support.mousePressEvent = lambda e: open_donation_page()
         fl.addWidget(credit)
         fl.addStretch()
         fl.addWidget(support)
