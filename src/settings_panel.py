@@ -19,6 +19,8 @@ from PyQt6.QtGui     import QFont, QIntValidator, QCursor, QKeySequence
 
 import math
 
+from donate import DONATE_URL
+
 APP_NAME    = "ClipDrop"
 APP_VERSION = "1.0.0"
 APP_AUTHOR  = "Cosmas Nwachukwu"
@@ -661,7 +663,7 @@ class SettingsPanel(QWidget):
         hlbl = QLabel("Row hover:", w); hlbl.setFixedWidth(80)
         hlbl.setStyleSheet(f"color:{C['text']};background:transparent;")
         hr.addWidget(hlbl)
-        self._hover_colour = self.history.settings.get("hover_colour", "default")
+        self._hover_colour = self.history.settings.get("hover_colour", "rose")
         self._hover_swatches = {}
         for key, name, swatch in self.HOVER_CHOICES:
             b = QPushButton("", hv_row)
@@ -793,7 +795,7 @@ class SettingsPanel(QWidget):
         name = QLabel("Side list rows", row); name.setFixedWidth(88)
         name.setStyleSheet(f"color:{C['text']};background:transparent;")
         rl.addWidget(name)
-        rows = max(1, min(20, int(self.history.settings.get("side_list_rows", 10))))
+        rows = max(1, min(20, int(self.history.settings.get("side_list_rows", 20))))
         rsld = QSlider(Qt.Orientation.Horizontal, row)
         rsld.setRange(1, 20); rsld.setValue(rows)
         rsld.setSingleStep(1); rsld.setPageStep(1); rsld.setFixedWidth(210)
@@ -1181,6 +1183,17 @@ class SettingsPanel(QWidget):
         link.setStyleSheet("background:transparent;")
         rl.addWidget(lbl); rl.addWidget(link); rl.addStretch()
         lay.addWidget(row)
+
+        # ── Support / donation button ──────────────────────────────────────────
+        # A warm rose face so it stands out from the indigo chrome and reads as
+        # a "support" action, not another settings control. Opens the Paystack
+        # page in the default browser (webbrowser — same as the popup footer).
+        lay.addSpacing(8)
+        donate = QPushButton("❤  Support ClipDrop", w)
+        donate.setCursor(Qt.CursorShape.PointingHandCursor)
+        donate.setStyleSheet(_btn_style("#e11d6b", "#ec4899"))
+        donate.clicked.connect(lambda: webbrowser.open(DONATE_URL))
+        lay.addWidget(donate)
         return w
 
     def _heading(self, text: str) -> QLabel:

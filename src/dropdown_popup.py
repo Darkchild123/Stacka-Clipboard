@@ -23,6 +23,8 @@ import hashlib
 import subprocess
 import webbrowser
 
+from donate import DONATE_URL
+
 import win32clipboard
 import win32con
 import win32gui
@@ -693,8 +695,8 @@ def _content_count(item: dict):
 # metrics before each popup build; set_window_size() sets the persisted
 # window size. Widgets read the live values at construction.
 
-_BASE_POPUP_WIDTH  = 420   # default main window width
-_BASE_POPUP_HEIGHT = 560   # default main window height
+_BASE_POPUP_WIDTH  = 358   # default main window width
+_BASE_POPUP_HEIGHT = 680   # default main window height
 _BASE_ITEM_HEIGHT  = 76    # main list row height
 _BASE_THUMB_SIZE   = 36    # row icon / thumbnail
 _BASE_PANEL_W      = 280   # side list width
@@ -2349,8 +2351,8 @@ class DropdownPopup(QObject):
             apply_scales(self.history.settings.get("scale_row", 100))
             set_window_size(self.history.settings.get("popup_w", _BASE_POPUP_WIDTH),
                             self.history.settings.get("popup_h", _BASE_POPUP_HEIGHT))
-            set_side_list_rows(self.history.settings.get("side_list_rows", 10))
-            set_hover_colour(self.history.settings.get("hover_colour", "default"))
+            set_side_list_rows(self.history.settings.get("side_list_rows", 20))
+            set_hover_colour(self.history.settings.get("hover_colour", "rose"))
             set_font_scale(self.history.settings.get("font_scale", 100))
         C = self._colours
 
@@ -2450,6 +2452,35 @@ class DropdownPopup(QObject):
                              QSizePolicy.Policy.Expanding)
         main_lay.addWidget(scroll, 1)
         self._scroll = scroll
+
+        # ── Footer: author credit + Support link ──────────────────────────────
+        # A slim always-visible strip that doubles as the author credit and the
+        # donate entry point. Kept to one thin line so it never steals room from
+        # the item list. The heart opens the Paystack page via webbrowser — the
+        # same call the row "Open link" action uses, and robust on this
+        # WS_EX_NOACTIVATE window (a plain browser launch, no focus needed).
+        sep3 = QFrame(popup); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet(f"color:{C['border']};")
+        main_lay.addWidget(sep3)
+
+        footer = QWidget(popup)
+        footer.setFixedHeight(24)
+        footer.setStyleSheet(f"background:{C['bg']};")
+        fl = QHBoxLayout(footer)
+        fl.setContentsMargins(PADDING, 0, PADDING, 0)
+        fl.setSpacing(6)
+        credit = QLabel("Made by Cosmas", footer)
+        credit.setStyleSheet(f"color:{C['text_dim']};background:transparent;font-size:11px;")
+        support = QLabel("❤ Support", footer)
+        support.setStyleSheet(
+            "color:#e11d6b;background:transparent;font-size:11px;font-weight:bold;")
+        support.setCursor(Qt.CursorShape.PointingHandCursor)
+        support.setToolTip("Support ClipDrop's development")
+        support.mousePressEvent = lambda e: webbrowser.open(DONATE_URL)
+        fl.addWidget(credit)
+        fl.addStretch()
+        fl.addWidget(support)
+        main_lay.addWidget(footer)
 
         # Connect search
         self._search_edit.textChanged.connect(self._on_search)

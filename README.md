@@ -17,6 +17,7 @@
 - [Roadmap](#roadmap)
 - [Known Issues](#known-issues)
 - [Development Log](#development-log)
+- [License](#license)
 
 ---
 
@@ -458,6 +459,16 @@ ClipDrop is being built by **Cosmas** as a first software development project â€
 ---
 
 *Built with passion. Designed for simplicity.*
+
+---
+
+## License
+
+ClipDrop is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** as published by the Free Software Foundation. See the [LICENSE](LICENSE) file for the full text.
+
+Copyright Â© 2026 Cosmas Nwachukwu
+
+This program is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 ---
 
