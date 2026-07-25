@@ -36,6 +36,54 @@ def _set_dpi_awareness():
 _set_dpi_awareness()
 
 
+# ── "--paste-signal" mode ───────────────────────────────────────────────────
+# The Explorer / Desktop right-click entry ("Paste from ClipDrop") can't call
+# into the already-running app directly, so it drops a signal file carrying the
+# cursor position; the running instance watches for it and opens the popup
+# there (see ContextMenu._watch_signal_file).
+#
+# The registry command used to be `pythonw.exe -c "<python>"`, which only works
+# when the app runs from source — the FROZEN ClipDrop.exe is not a Python
+# interpreter, so `ClipDrop.exe -c "..."` just launched a second copy of the app
+# instead of opening the popup. Now the exe (or main.py) is invoked with
+# --paste-signal and does the job itself.
+#
+# This runs BEFORE the PyQt6 imports so the helper process starts, writes one
+# small file and exits in milliseconds — it never builds a UI.
+def _write_paste_signal():
+    import ctypes, tempfile
+
+    class _PT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    pt = _PT()
+    try:
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    except Exception:
+        return 1
+    try:
+        path = os.path.join(tempfile.gettempdir(), "clipdrop.signal")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"Point(x={pt.x}, y={pt.y})")
+    except Exception:
+        return 1
+    return 0
+
+
+if "--paste-signal" in sys.argv:
+    sys.exit(_write_paste_signal())
+
+
+# Redirect stdout/stderr to %APPDATA%\ClipDrop\clipdrop.log. A --windowed build
+# has no console (print() would vanish), so this is the only diagnostic trail —
+# and it also captures uncaught tracebacks. Placed AFTER the --paste-signal exit
+# so the short-lived helper process never opens the log, and BEFORE the heavy
+# imports so an import-time failure is recorded too. Running from source, output
+# still appears on the console as well.
+import applog
+applog.setup()
+
+
 def _set_app_user_model_id():
     # Windows: give the process its own taskbar identity so it shows ClipDrop's
     # icon (not the Python launcher's) and pins / groups as its own app.

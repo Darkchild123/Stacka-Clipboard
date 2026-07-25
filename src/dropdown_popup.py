@@ -3278,7 +3278,9 @@ class DropdownPopup(QObject):
         if reason == "missing":
             self._show_toast(f"⚠ No longer exists:  {os.path.basename(path)}")
         else:
-            print(f"[ClipDrop] Open failed for {path}: {reason}")
+            # Path omitted — it goes to the plaintext log. The user already
+            # sees the file name in the toast.
+            print(f"[ClipDrop] Open failed: {reason}")
             self._show_toast(f"⚠ Could not open  {os.path.basename(path)}")
 
     # ── Multi-selection + drag-out ───────────────────────────────────────────

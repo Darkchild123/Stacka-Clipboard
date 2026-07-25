@@ -153,7 +153,9 @@ class ClipboardWatcher:
                         "source":  source,
                         "pinned":  False,
                     })
-                    print(f"New item captured: [card] {card['brand']} ****{card['last4']}")
+                    # No brand/last4 here: the log is plaintext on disk while
+                    # the card itself is encrypted (see applog.py privacy note).
+                    print("New item captured: [card]")
                     return
 
         # Build a clipboard item as a dictionary
@@ -168,7 +170,10 @@ class ClipboardWatcher:
 
         # Send the item to the History Manager to be saved
         self.history.add_item(item)
-        print(f"New item captured: [{content_type}] from {source}")
+        # The source is the active window's title (a document name, a page
+        # title, a URL…) — clipboard metadata, so it is deliberately NOT
+        # written to the plaintext log. Type only.
+        print(f"New item captured: [{content_type}]")
 
 
     def _classify_text(self, text):
