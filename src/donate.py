@@ -1,11 +1,11 @@
 # ============================================================
-# ClipDrop - donate.py
+# Stacka - donate.py
 # ============================================================
 # Single source of truth for the donation link, plus the one helper
 # used to open it.
 #
 # Two places use this:
-#   * the "🎁 Support ClipDrop" button in Settings -> About
+#   * the "🎁 Support Stacka" button in Settings -> About
 #   * the "🎁 Support" link in the main popup's footer strip
 #
 # To change where the button sends users, edit DONATE_URL only —
@@ -14,7 +14,7 @@
 
 import webbrowser
 
-# Paystack payment page (Support ClipDrop)
+# Paystack payment page (Support Stacka)
 DONATE_URL = "https://paystack.shop/pay/qh7vjjsstc"
 
 

@@ -1,7 +1,7 @@
 # ============================================================
-# ClipDrop - history_manager.py
+# Stacka - history_manager.py
 # ============================================================
-# This is the brain of ClipDrop. It manages everything related
+# This is the brain of Stacka. It manages everything related
 # to clipboard history — saving, loading, pinning, deleting,
 # reordering, and enforcing the history size limit.
 # ============================================================
@@ -13,7 +13,7 @@ from PIL import Image
 
 
 # --- File paths for saving data ---
-# app_paths.user_data_root() is the project root in dev, but %APPDATA%\ClipDrop
+# app_paths.user_data_root() is the project root in dev, but %APPDATA%\Stacka
 # when running as the packaged app — so an installed copy writes history and
 # settings to a per-user, writable location instead of next to the exe.
 import secure_store
@@ -348,7 +348,7 @@ class HistoryManager:
     # ============================================================
 
     def _ensure_folders(self):
-        """Makes sure all the folders ClipDrop needs actually exist."""
+        """Makes sure all the folders Stacka needs actually exist."""
         os.makedirs(DATA_DIR,     exist_ok=True)
         os.makedirs(SETTINGS_DIR, exist_ok=True)
         os.makedirs(IMAGES_DIR,   exist_ok=True)

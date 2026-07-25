@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - clipboard_watcher.py
+# Stacka - clipboard_watcher.py
 # ============================================================
 # This file watches the Windows clipboard non-stop.
 # Every time you copy something, it detects it, figures out
@@ -43,7 +43,7 @@ class ClipboardWatcher:
         # Controls whether the watcher is running
         self.running = False
 
-        # Pause flag — set to True while ClipDrop is pasting
+        # Pause flag — set to True while Stacka is pasting
         # so we don't accidentally record our own paste as a new copy
         self.paused = False
 
@@ -58,7 +58,7 @@ class ClipboardWatcher:
 
         while self.running:
             try:
-                # Skip checking while ClipDrop is pasting
+                # Skip checking while Stacka is pasting
                 if not self.paused:
                     self.check_clipboard()
             except Exception as e:

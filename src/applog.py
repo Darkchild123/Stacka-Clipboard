@@ -1,16 +1,16 @@
 # ============================================================
-# ClipDrop - applog.py
+# Stacka - applog.py
 # ============================================================
 # File-based logging, so a WINDOWED (no-console) build still leaves a
 # diagnostic trail.
 #
-# A packaged ClipDrop is built with --windowed: Windows gives it no console,
+# A packaged Stacka is built with --windowed: Windows gives it no console,
 # and PyInstaller sets sys.stdout / sys.stderr to None, which turns every
 # print() into a silent no-op. That removes the console flash, but it also
 # means a misbehaving build tells you nothing.
 #
 # setup() redirects stdout and stderr to:
-#     <user data>/clipdrop.log      (%APPDATA%\ClipDrop\clipdrop.log when packaged)
+#     <user data>/stacka.log      (%APPDATA%\Stacka\stacka.log when packaged)
 # so all the existing print() calls — and any uncaught traceback — are written
 # there instead. No existing code has to change.
 #
@@ -30,7 +30,7 @@ import os
 import sys
 import threading
 
-LOG_NAME  = "clipdrop.log"
+LOG_NAME  = "stacka.log"
 MAX_BYTES = 1_000_000        # rotate at ~1 MB, keeping one .1 backup
 
 _installed = False
@@ -89,7 +89,7 @@ class _LogWriter:
         return False
 
     def fileno(self):          # some libraries probe this
-        raise OSError("ClipDrop log has no file descriptor")
+        raise OSError("Stacka log has no file descriptor")
 
 
 def _rotate(path):
@@ -129,11 +129,11 @@ def setup():
         sys.excepthook = _hook
 
         _installed = True
-        print(f"--- ClipDrop log opened ({'packaged' if getattr(sys, 'frozen', False) else 'source'}) ---")
+        print(f"--- Stacka log opened ({'packaged' if getattr(sys, 'frozen', False) else 'source'}) ---")
         return path
     except Exception as e:
         try:
-            print(f"[ClipDrop] Could not open log file: {e}")
+            print(f"[Stacka] Could not open log file: {e}")
         except Exception:
             pass
         return None

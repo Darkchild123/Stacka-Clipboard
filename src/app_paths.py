@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - app_paths.py
+# Stacka - app_paths.py
 # ============================================================
 # One place that resolves file locations for BOTH the dev checkout
 # and the packaged (PyInstaller) app.
@@ -9,7 +9,7 @@
 #       dev    : the project root
 #
 #   user_data_root()   -> WRITABLE per-user data (history, settings, images).
-#       frozen : %APPDATA%\ClipDrop  (per-user, writable, survives updates,
+#       frozen : %APPDATA%\Stacka  (per-user, writable, survives updates,
 #                and works even when the app is installed to Program Files)
 #       dev    : the project root  (so the dev workflow is unchanged)
 # ============================================================
@@ -17,7 +17,7 @@
 import os
 import sys
 
-APP_NAME = "ClipDrop"
+APP_NAME = "Stacka"
 
 # In a dev checkout this file lives in src/, so the project root is one up.
 _DEV_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

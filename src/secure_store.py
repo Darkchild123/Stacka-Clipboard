@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - secure_store.py
+# Stacka - secure_store.py
 # ============================================================
 # Encryption at rest for the clipboard stores (history.json,
 # profiles.json).
@@ -25,12 +25,13 @@
 #
 # FORMAT: an encrypted file is itself a small JSON envelope, so it stays a
 # valid text file and is trivially detectable:
-#     {"clipdrop_enc": 1, "data": "<base64 DPAPI blob>"}
+#     {"stacka_enc": 1, "data": "<base64 DPAPI blob>"}
 # A plaintext (legacy) file is the bare JSON payload as before.
 #
 # MIGRATION: read_json() accepts BOTH formats, so an existing plaintext
 # history is loaded normally and simply rewritten encrypted on the next
-# save. No user action, no data loss.
+# save. It also still reads envelopes stamped with the pre-rename key
+# (see _LEGACY_ENVELOPE_KEYS). No user action, no data loss.
 #
 # FALLBACK: if DPAPI is unavailable (non-Windows, or the API fails),
 # write_json() falls back to plaintext rather than losing the user's data,
@@ -41,8 +42,26 @@ import base64
 import json
 import os
 
-_ENVELOPE_KEY = "clipdrop_enc"
+_ENVELOPE_KEY = "stacka_enc"
+
+# Files encrypted before the app was renamed carry the old stamp. Reading them
+# must keep working — otherwise an existing encrypted history stops looking
+# like an envelope, gets handed back as raw JSON, and the user's data is gone.
+# They are re-stamped with the current key on the next save.
+_LEGACY_ENVELOPE_KEYS = ("clipdrop_enc",)
+
 _warned = False
+
+
+def _envelope_blob(raw):
+    """The base64 blob if `raw` is an encrypted envelope (current or legacy
+    stamp), else None."""
+    if not isinstance(raw, dict):
+        return None
+    for key in (_ENVELOPE_KEY,) + _LEGACY_ENVELOPE_KEYS:
+        if raw.get(key):
+            return raw.get("data", "")
+    return None
 
 
 def _dpapi_encrypt(text: str):
@@ -50,7 +69,7 @@ def _dpapi_encrypt(text: str):
     try:
         import win32crypt
         blob = win32crypt.CryptProtectData(
-            text.encode("utf-8"), "ClipDrop clipboard data", None, None, None, 0)
+            text.encode("utf-8"), "Stacka clipboard data", None, None, None, 0)
         return base64.b64encode(blob).decode("ascii")
     except Exception:
         return None
@@ -69,7 +88,7 @@ def _dpapi_decrypt(enc_b64: str):
 
 def is_encryption_available() -> bool:
     """True when DPAPI can actually encrypt on this machine."""
-    return _dpapi_encrypt("clipdrop") is not None
+    return _dpapi_encrypt("stacka") is not None
 
 
 def read_json(path: str, default=None):
@@ -81,9 +100,10 @@ def read_json(path: str, default=None):
     except Exception:
         return default
 
-    # Encrypted envelope?
-    if isinstance(raw, dict) and raw.get(_ENVELOPE_KEY):
-        plain = _dpapi_decrypt(raw.get("data", ""))
+    # Encrypted envelope? (current stamp, or one written before the rename)
+    blob = _envelope_blob(raw)
+    if blob is not None:
+        plain = _dpapi_decrypt(blob)
         if plain is None:
             # Wrong user / corrupt blob — do NOT silently return empty data,
             # let the caller fall back to its .bak like any other read failure.
@@ -116,7 +136,7 @@ def write_json(path: str, payload) -> bool:
         else:
             out = text          # fallback: never lose data over encryption
             if not _warned:
-                print("[ClipDrop] DPAPI unavailable — storing data unencrypted.")
+                print("[Stacka] DPAPI unavailable — storing data unencrypted.")
                 _warned = True
 
         with open(tmp_path, "w", encoding="utf-8") as f:
@@ -134,5 +154,5 @@ def write_json(path: str, payload) -> bool:
         os.replace(tmp_path, path)
         return True
     except Exception as e:
-        print(f"[ClipDrop] Failed to write {os.path.basename(path)}: {e}")
+        print(f"[Stacka] Failed to write {os.path.basename(path)}: {e}")
         return False

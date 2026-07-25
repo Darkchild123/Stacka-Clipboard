@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - main.py
+# Stacka - main.py
 # ============================================================
 # App entry point. Starts all components in the correct order.
 #
@@ -37,14 +37,14 @@ _set_dpi_awareness()
 
 
 # ── "--paste-signal" mode ───────────────────────────────────────────────────
-# The Explorer / Desktop right-click entry ("Paste from ClipDrop") can't call
+# The Explorer / Desktop right-click entry ("Paste from Stacka") can't call
 # into the already-running app directly, so it drops a signal file carrying the
 # cursor position; the running instance watches for it and opens the popup
 # there (see ContextMenu._watch_signal_file).
 #
 # The registry command used to be `pythonw.exe -c "<python>"`, which only works
-# when the app runs from source — the FROZEN ClipDrop.exe is not a Python
-# interpreter, so `ClipDrop.exe -c "..."` just launched a second copy of the app
+# when the app runs from source — the FROZEN Stacka.exe is not a Python
+# interpreter, so `Stacka.exe -c "..."` just launched a second copy of the app
 # instead of opening the popup. Now the exe (or main.py) is invoked with
 # --paste-signal and does the job itself.
 #
@@ -62,7 +62,7 @@ def _write_paste_signal():
     except Exception:
         return 1
     try:
-        path = os.path.join(tempfile.gettempdir(), "clipdrop.signal")
+        path = os.path.join(tempfile.gettempdir(), "stacka.signal")
         with open(path, "w", encoding="utf-8") as f:
             f.write(f"Point(x={pt.x}, y={pt.y})")
     except Exception:
@@ -74,7 +74,7 @@ if "--paste-signal" in sys.argv:
     sys.exit(_write_paste_signal())
 
 
-# Redirect stdout/stderr to %APPDATA%\ClipDrop\clipdrop.log. A --windowed build
+# Redirect stdout/stderr to %APPDATA%\Stacka\stacka.log. A --windowed build
 # has no console (print() would vanish), so this is the only diagnostic trail —
 # and it also captures uncaught tracebacks. Placed AFTER the --paste-signal exit
 # so the short-lived helper process never opens the log, and BEFORE the heavy
@@ -85,11 +85,11 @@ applog.setup()
 
 
 def _set_app_user_model_id():
-    # Windows: give the process its own taskbar identity so it shows ClipDrop's
+    # Windows: give the process its own taskbar identity so it shows Stacka's
     # icon (not the Python launcher's) and pins / groups as its own app.
     import ctypes
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cosmas.ClipDrop")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cosmas.Stacka")
     except Exception:
         pass
 _set_app_user_model_id()
@@ -132,7 +132,7 @@ def protected_thread(name, target, *args, **kwargs):
 
 
 def main():
-    print("ClipDrop is starting...")
+    print("Stacka is starting...")
 
     # Step 1: QApplication — must exist before any QWidget is created
     app = QApplication(sys.argv)
@@ -141,7 +141,7 @@ def main():
     # App-wide window icon — taskbar, Alt+Tab, and every window's title bar.
     # Prefer the multi-size .ico (Windows picks the crispest per context),
     # fall back to the PNG. resource_path() locates them in the bundle when frozen.
-    for _name in ("clipdrop.ico", "icon.png"):
+    for _name in ("stacka.ico", "icon.png"):
         _p = resource_path("assets", _name)
         if os.path.exists(_p):
             app.setWindowIcon(QIcon(_p))
@@ -165,7 +165,7 @@ def main():
                           profile_manager=profiles)
     # Expose app-wide so the settings panel can live-apply theme /
     # transparency changes to an open popup.
-    app.setProperty("clipdrop_popup", popup)
+    app.setProperty("stacka_popup", popup)
 
     # Step 6: Context Menu — setup() starts its own internal daemon threads
     # for mouse hook and signal file watcher; the call itself returns quickly.
@@ -173,7 +173,7 @@ def main():
     context = ContextMenu(history, popup)
     context.setup()
     # Expose app-wide so the Shortcuts window can re-bind the hotkey live
-    app.setProperty("clipdrop_context", context)
+    app.setProperty("stacka_context", context)
 
     # Step 7: Tray Icon — start() schedules tray creation via QTimer;
     # must be called on the main thread.
@@ -181,22 +181,22 @@ def main():
     tray.start()
     # Expose the tray app-wide so DropdownPopup._show_toast can post
     # balloon notifications without a circular import.
-    app.setProperty("clipdrop_tray", tray)
+    app.setProperty("stacka_tray", tray)
 
-    print("ClipDrop is running.")
-    print("  Right-click anywhere → 'Paste from ClipDrop'")
+    print("Stacka is running.")
+    print("  Right-click anywhere → 'Paste from Stacka'")
     print("  Or press Ctrl+Shift+V from any app")
 
     try:
         sys.exit(app.exec())
     except KeyboardInterrupt:
-        print("ClipDrop interrupted.")
+        print("Stacka interrupted.")
     finally:
         try:
             context.teardown()
         except Exception:
             pass
-        print("ClipDrop closed.")
+        print("Stacka closed.")
 
 
 if __name__ == "__main__":

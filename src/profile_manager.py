@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - profile_manager.py
+# Stacka - profile_manager.py
 # ============================================================
 # Manages clipboard profiles — named collections that let users
 # organise their clipboard history into separate workflows.

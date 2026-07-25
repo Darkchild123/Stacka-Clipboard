@@ -1,16 +1,16 @@
 <!DOCTYPE html>
 <!--
-  ClipDrop — URL Icon Generator
+  Stacka — URL Icon Generator
   ==============================
   Open this file in Chrome or Edge.
   It will instantly download url_icon.png at 256x256.
-  Move that file to:  Project ClipDrop/assets/url_icon.png
+  Move that file to:  Project Stacka/assets/url_icon.png
 -->
 <html>
 <head><title>Generate url_icon.png</title></head>
 <body style="background:#111;color:#eee;font-family:sans-serif;padding:24px">
 
-<h2>ClipDrop — URL Icon Generator</h2>
+<h2>Stacka — URL Icon Generator</h2>
 <p>Rendering SVG → PNG…</p>
 <canvas id="c" width="256" height="256" style="border:1px solid #444;display:block;margin:16px 0"></canvas>
 <p id="status">Working…</p>
@@ -37,7 +37,7 @@ img.onload = function () {
         a.click();
         document.getElementById('status').innerHTML =
             '✅ <strong>url_icon.png downloaded!</strong><br>' +
-            'Move it to: <code>Project ClipDrop/assets/url_icon.png</code>';
+            'Move it to: <code>Project Stacka/assets/url_icon.png</code>';
     }, 'image/png');
 };
 

@@ -1,10 +1,10 @@
 ; ============================================================
-;  ClipDrop — Inno Setup script
+;  Stacka — Inno Setup script
 ; ============================================================
-;  Builds ClipDrop-Setup.exe from the PyInstaller one-folder output.
+;  Builds Stacka-Setup.exe from the PyInstaller one-folder output.
 ;
 ;  BEFORE COMPILING, build the app first:
-;    python -m PyInstaller --name ClipDrop --icon assets\clipdrop.ico ^
+;    python -m PyInstaller --name Stacka --icon assets\stacka.ico ^
 ;           --add-data "assets;assets" --windowed --noconfirm src\main.py
 ;
 ;  Then open this file in Inno Setup and press Build > Compile (Ctrl+F9).
@@ -12,26 +12,26 @@
 ;
 ;  Design notes:
 ;   * PER-USER install (PrivilegesRequired=lowest) — installs to
-;     %LOCALAPPDATA%\Programs\ClipDrop, so there is NO admin/UAC prompt.
-;     ClipDrop only ever needs the current user's account.
-;   * ClipDrop is a background tray app, so it is force-closed before an
+;     %LOCALAPPDATA%\Programs\Stacka, so there is NO admin/UAC prompt.
+;     Stacka only ever needs the current user's account.
+;   * Stacka is a background tray app, so it is force-closed before an
 ;     install or uninstall — otherwise its running .exe is locked on disk.
 ;   * A force-close skips the app's own registry cleanup, so the uninstaller
 ;     removes the shell keys itself (see [Registry]).
-;   * The user's clipboard history in %APPDATA%\ClipDrop is NEVER deleted
+;   * The user's clipboard history in %APPDATA%\Stacka is NEVER deleted
 ;     silently; the uninstaller asks, and defaults to keeping it.
 ; ============================================================
 
-#define AppName        "ClipDrop"
+#define AppName        "Stacka"
 #define AppVersion     "1.0.0"
 #define AppPublisher   "Cosmas Nwachukwu"
-#define AppURL         "https://github.com/Darkchild123/Project-ClipDrop"
-#define AppExeName     "ClipDrop.exe"
+#define AppURL         "https://github.com/Darkchild123/Stacka-Clipboard"
+#define AppExeName     "Stacka.exe"
 
 [Setup]
 ; A fixed AppId is what lets a later version UPGRADE this install
 ; instead of appearing as a second, separate program. Never change it.
-AppId={{8F3C6A21-7B4D-4E59-9C2A-1D5E0B7A93F4}
+AppId={{301A3080-06DD-4E77-BA8C-CB09100D64B8}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -48,12 +48,12 @@ DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 AllowNoIcons=yes
 
-; ClipDrop is built 64-bit, so refuse 32-bit Windows rather than
+; Stacka is built 64-bit, so refuse 32-bit Windows rather than
 ; installing something that cannot run.
 ArchitecturesAllowed=x64compatible
 
 LicenseFile=LICENSE
-SetupIconFile=assets\clipdrop.ico
+SetupIconFile=assets\stacka.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 UninstallDisplayName={#AppName}
 OutputDir=installer_output
@@ -73,9 +73,9 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; \
     GroupDescription: "Shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "dist\ClipDrop\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\Stacka\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; _internal holds the bundled Python runtime, PyQt6 and the assets folder.
-Source: "dist\ClipDrop\_internal\*"; DestDir: "{app}\_internal"; \
+Source: "dist\Stacka\_internal\*"; DestDir: "{app}\_internal"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -89,14 +89,14 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; \
     ValueType: string; ValueName: "{#AppName}"; ValueData: """{app}\{#AppExeName}"""; \
     Flags: uninsdeletevalue; Tasks: startup
 
-; The "Paste from ClipDrop" shell entries are created by the app at runtime.
+; The "Paste from Stacka" shell entries are created by the app at runtime.
 ; It removes them on a clean quit, but the uninstaller force-closes the app,
 ; so clean them up here too — dontcreatekey means "only delete, never create".
-Root: HKCU; Subkey: "Software\Classes\*\shell\ClipDrop"; \
+Root: HKCU; Subkey: "Software\Classes\*\shell\Stacka"; \
     Flags: dontcreatekey uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\Directory\shell\ClipDrop"; \
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Stacka"; \
     Flags: dontcreatekey uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\ClipDrop"; \
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\Stacka"; \
     Flags: dontcreatekey uninsdeletekey
 
 [Run]
@@ -104,10 +104,10 @@ Filename: "{app}\{#AppExeName}"; Description: "Start {#AppName} now"; \
     Flags: nowait postinstall skipifsilent
 
 [Code]
-{ ClipDrop runs in the tray with no window, so Windows' Restart Manager
+{ Stacka runs in the tray with no window, so Windows' Restart Manager
   cannot ask it to close politely — its .exe would stay locked and the
   install/uninstall would fail. Force-close it first. }
-procedure StopClipDrop();
+procedure StopStacka();
 var
   ResultCode: Integer;
 begin
@@ -119,13 +119,13 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  StopClipDrop();
+  StopStacka();
   Result := '';
 end;
 
 function InitializeUninstall(): Boolean;
 begin
-  StopClipDrop();
+  StopStacka();
   Result := True;
 end;
 
@@ -139,7 +139,7 @@ begin
     if DirExists(DataDir) then
     begin
       { Default is No — never delete someone's saved clips by accident. }
-      if MsgBox('Also delete your ClipDrop clipboard history and settings?' + #13#10 + #13#10 +
+      if MsgBox('Also delete your Stacka clipboard history and settings?' + #13#10 + #13#10 +
                 DataDir + #13#10 + #13#10 +
                 'Choose No to keep them for a future reinstall.',
                 mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
