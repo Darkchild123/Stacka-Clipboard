@@ -454,6 +454,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-25 | Windows packaging begun — standalone PyInstaller `.exe`; runtime paths made install-safe (user data → `%APPDATA%`, assets read from the bundle), and the Stacka icon added to the tray, taskbar, and windows |
 | 2026-07-25 | Localisation — in-app translation engine with a language picker in the Settings header; 6 languages added (French, Spanish, Italian, Russian, Chinese, Korean) covering Settings, the popup and its context menus, the tray menu, and the support buttons |
 | 2026-07-25 | Clipboard history and profiles encrypted at rest with Windows DPAPI — tied to the user account, no password needed, with automatic migration of existing plaintext data; security architecture documented |
+| 2026-07-25 | Renamed to Stacka — the original name conflicted with an existing commercial product, so the app, its documentation and its Windows integration were renamed before release |
 
 ---
 
