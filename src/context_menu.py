@@ -878,6 +878,12 @@ class ContextMenu:
     # ── Registry ──────────────────────────────────────────────────────────────
 
     def _register_in_registry(self):
+        # Menu icon: the frozen exe carries the embedded ClipDrop icon; in dev
+        # point straight at the .ico so the ClipDrop icon shows there too
+        # (instead of python.exe's icon).
+        from app_paths import is_frozen, resource_path
+        icon_value = (sys.executable + ",0") if is_frozen() \
+            else resource_path("assets", "clipdrop.ico")
         pythonw = sys.executable.replace("python.exe", "pythonw.exe")
         if not os.path.exists(pythonw):
             pythonw = sys.executable
@@ -889,7 +895,7 @@ class ContextMenu:
                     r"Software\Classes\\" + reg_path, 0,
                     winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from ClipDrop")
-                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, icon_value)
                 winreg.CloseKey(key)
                 cmd_key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                     r"Software\Classes\\" + reg_path + r"\command", 0, winreg.KEY_SET_VALUE)

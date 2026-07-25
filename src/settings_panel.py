@@ -10,13 +10,14 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QSlider,
     QListWidget, QListWidgetItem, QFrame,
     QInputDialog, QMessageBox, QApplication, QScrollArea,
-    QKeySequenceEdit,
+    QKeySequenceEdit, QComboBox,
 )
 from PyQt6.QtCore    import Qt, QTimer, QEvent, QVariantAnimation
 from PyQt6.QtGui     import QFont, QIntValidator, QCursor, QKeySequence
 
 import math
 
+import i18n
 from donate import DONATE_URL, open_donation_page
 
 APP_NAME    = "ClipDrop"
@@ -534,14 +535,21 @@ class SettingsPanel(QWidget):
         main.setContentsMargins(0, 0, 0, 0)
         main.setSpacing(0)
 
-        # Header — gradient surface with a dark seam (raised 3D look)
-        hdr = QLabel("📋  ClipDrop Settings", self)
-        hdr.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Header — gradient surface with a dark seam (raised 3D look), now
+        # carrying the app title on the left and the language selector right.
+        hdr = QWidget(self)
         hdr.setFixedHeight(48)
         hdr.setStyleSheet(
             f"background:{_grad_v(C['accent_hover'], _shade(C['accent'], -0.18))};"
-            f"color:white;border-bottom:1px solid rgba(0,0,0,90);")
+            f"border-bottom:1px solid rgba(0,0,0,90);")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(16, 0, 10, 0)
+        title = QLabel("📋  " + i18n.tr("Settings"), hdr)
+        title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        title.setStyleSheet("color:white;background:transparent;")
+        hl.addWidget(title)
+        hl.addStretch()
+        hl.addWidget(self._build_lang_combo(hdr))
         main.addWidget(hdr)
 
         # Scrollable content — the window stays compact; sections that
@@ -586,7 +594,7 @@ class SettingsPanel(QWidget):
         footer.setStyleSheet(f"background:{C['bg_section']};")
         fl = QHBoxLayout(footer)
         fl.setContentsMargins(16, 8, 16, 8)
-        close_btn = QPushButton("Close", footer)
+        close_btn = QPushButton(i18n.tr("Close"), footer)
         close_btn.setFixedWidth(100)
         close_btn.setStyleSheet(_btn_style(C["accent"], C["accent_hover"]))
         close_btn.clicked.connect(self.close)
@@ -604,22 +612,60 @@ class SettingsPanel(QWidget):
         line.setStyleSheet(f"color:{self.C['border']};margin:4px 8px;")
         return line
 
+    def _build_lang_combo(self, parent) -> QComboBox:
+        """Language selector for the header — each language shown in its own
+        name (endonym); the active one is what's displayed when it's closed."""
+        C = self.C
+        combo = QComboBox(parent)
+        for code, name in i18n.LANGUAGES:
+            combo.addItem(name, code)
+        idx = combo.findData(self.history.settings.get("language", "en"))
+        if idx >= 0:
+            combo.setCurrentIndex(idx)          # set BEFORE connect — no stray fire
+        combo.setFixedWidth(122)
+        combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        combo.setStyleSheet(
+            "QComboBox{background:rgba(0,0,0,55);color:white;border:1px solid "
+            "rgba(255,255,255,70);border-radius:5px;padding:2px 8px;}"
+            "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:center right;"
+            "border:none;width:20px;}"
+            "QComboBox::down-arrow{width:0;height:0;margin-right:7px;"
+            "border-left:5px solid transparent;border-right:5px solid transparent;"
+            "border-top:6px solid white;}"
+            f"QComboBox QAbstractItemView{{background:{C['bg_section']};"
+            f"color:{C['text']};selection-background-color:{C['accent']};"
+            "selection-color:white;outline:none;}")
+        combo.currentIndexChanged.connect(self._on_language_changed)
+        return combo
+
+    def _on_language_changed(self, idx: int):
+        combo = self.sender()
+        code = combo.itemData(idx) if combo is not None else None
+        if not code or code == self.history.settings.get("language", "en"):
+            return
+        self.history.save_setting("language", code)
+        i18n.set_language(code)
+        # Re-render the whole panel in the new language (same path as a theme
+        # change — deferred widget deletion, so this is safe from the signal).
+        self._rebuild_ui()
+        self._apply_titlebar_theme()
+
     def _section_appearance(self) -> QWidget:
         C = self.C
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("🎨  Appearance"))
+        lay.addWidget(self._heading("🎨  " + i18n.tr("Appearance")))
 
         # Theme toggle
         theme_row = QWidget(w); theme_row.setStyleSheet(f"background:{C['bg']};")
         tr = QHBoxLayout(theme_row); tr.setContentsMargins(0,0,0,0); tr.setSpacing(8)
-        lbl = QLabel("Theme:", w); lbl.setFixedWidth(80)
+        lbl = QLabel(i18n.tr("Theme:"), w); lbl.setFixedWidth(80)
         lbl.setStyleSheet(f"color:{C['text']};background:transparent;")
         tr.addWidget(lbl)
 
-        self._dark_btn  = QPushButton("🌙  Dark",  w)
-        self._light_btn = QPushButton("☀️  Light", w)
+        self._dark_btn  = QPushButton("🌙  " + i18n.tr("Dark"),  w)
+        self._light_btn = QPushButton("☀️  " + i18n.tr("Light"), w)
         self._dark_btn.setFixedWidth(90)
         self._light_btn.setFixedWidth(90)
         self._refresh_theme_buttons()
@@ -631,7 +677,7 @@ class SettingsPanel(QWidget):
         lay.addWidget(theme_row)
 
         # Transparency slider
-        lbl2 = QLabel("Popup transparency:", w)
+        lbl2 = QLabel(i18n.tr("Popup transparency:"), w)
         lbl2.setStyleSheet(f"color:{C['text']};background:transparent;")
         lay.addWidget(lbl2)
 
@@ -659,7 +705,7 @@ class SettingsPanel(QWidget):
         # Row hover colour — a strip of clickable swatches
         hv_row = QWidget(w); hv_row.setStyleSheet(f"background:{C['bg']};")
         hr = QHBoxLayout(hv_row); hr.setContentsMargins(0,2,0,0); hr.setSpacing(6)
-        hlbl = QLabel("Row hover:", w); hlbl.setFixedWidth(80)
+        hlbl = QLabel(i18n.tr("Row hover:"), w); hlbl.setFixedWidth(80)
         hlbl.setStyleSheet(f"color:{C['text']};background:transparent;")
         hr.addWidget(hlbl)
         self._hover_colour = self.history.settings.get("hover_colour", "rose")
@@ -668,7 +714,7 @@ class SettingsPanel(QWidget):
             b = QPushButton("", hv_row)
             b.setFixedSize(22, 22)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(name)
+            b.setToolTip(i18n.tr(name))
             b.clicked.connect(lambda _=False, k=key: self._set_hover_colour(k))
             self._hover_swatches[key] = (b, swatch)
             hr.addWidget(b)
@@ -743,8 +789,8 @@ class SettingsPanel(QWidget):
 
         head = QWidget(w); head.setStyleSheet(f"background:{C['bg']};")
         hl = QHBoxLayout(head); hl.setContentsMargins(0,0,0,0); hl.setSpacing(8)
-        hl.addWidget(self._heading("📐  Sizing"))
-        hint = QLabel("10% steps · 100% = default", head)
+        hl.addWidget(self._heading("📐  " + i18n.tr("Sizing")))
+        hint = QLabel(i18n.tr("10% steps · 100% = default"), head)
         hint.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
         hl.addWidget(hint); hl.addStretch()
         lay.addWidget(head)
@@ -761,7 +807,7 @@ class SettingsPanel(QWidget):
             row.setFixedHeight(24)
             rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
 
-            name = QLabel(label, row); name.setFixedWidth(88)
+            name = QLabel(i18n.tr(label), row); name.setFixedWidth(88)
             name.setStyleSheet(f"color:{C['text']};background:transparent;")
             rl.addWidget(name)
 
@@ -791,7 +837,7 @@ class SettingsPanel(QWidget):
         row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
         row.setFixedHeight(24)
         rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-        name = QLabel("Side list rows", row); name.setFixedWidth(88)
+        name = QLabel(i18n.tr("Side list rows"), row); name.setFixedWidth(88)
         name.setStyleSheet(f"color:{C['text']};background:transparent;")
         rl.addWidget(name)
         rows = max(1, min(20, int(self.history.settings.get("side_list_rows", 20))))
@@ -814,7 +860,7 @@ class SettingsPanel(QWidget):
         frow = QWidget(w); frow.setStyleSheet(f"background:{C['bg']};")
         frow.setFixedHeight(24)
         fl = QHBoxLayout(frow); fl.setContentsMargins(0,0,0,0); fl.setSpacing(8)
-        fname = QLabel("Font size", frow); fname.setFixedWidth(88)
+        fname = QLabel(i18n.tr("Font size"), frow); fname.setFixedWidth(88)
         fname.setStyleSheet(f"color:{C['text']};background:transparent;")
         fl.addWidget(fname)
         fpct = max(80, min(140, int(round(int(self.history.settings.get("font_scale",100))/10.0)*10)))
@@ -865,17 +911,17 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("🖼️  Icon pack"))
+        lay.addWidget(self._heading("🖼️  " + i18n.tr("Icon pack")))
         self._icon_pack = self.history.settings.get("icon_pack", "default")
         self._icon_pack_btns = {}
         for pack, label, caption in self.ICON_PACKS:
             row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
             rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-            btn = QPushButton(label, row)
+            btn = QPushButton(i18n.tr(label), row)
             btn.setFixedWidth(165)
             btn.clicked.connect(lambda _=False, p=pack: self._set_icon_pack(p))
             rl.addWidget(btn)
-            cap = QLabel(caption, row); cap.setWordWrap(True)
+            cap = QLabel(i18n.tr(caption), row); cap.setWordWrap(True)
             cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
             rl.addWidget(cap, 1)
             self._icon_pack_btns[pack] = btn
@@ -903,9 +949,9 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("🖱️  Popup trigger"))
-        hint = QLabel("Pick up to two — e.g. overlay button + double "
-                      "right-click. “Hotkey only” can’t be combined.", w)
+        lay.addWidget(self._heading("🖱️  " + i18n.tr("Popup trigger")))
+        hint = QLabel(i18n.tr("Pick up to two — e.g. overlay button + double "
+                              "right-click. “Hotkey only” can’t be combined."), w)
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;"
                            f"background:transparent;")
@@ -916,11 +962,11 @@ class SettingsPanel(QWidget):
         for mode, label, caption in self.TRIGGER_MODES:
             row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
             rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-            btn = QPushButton(label, row)
+            btn = QPushButton(i18n.tr(label), row)
             btn.setFixedWidth(165)
             btn.clicked.connect(lambda _=False, m=mode: self._toggle_trigger(m))
             rl.addWidget(btn)
-            cap = QLabel(caption, row)
+            cap = QLabel(i18n.tr(caption), row)
             cap.setWordWrap(True)
             cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
             rl.addWidget(cap, 1)
@@ -981,17 +1027,17 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("🪟  Close behaviour"))
+        lay.addWidget(self._heading("🪟  " + i18n.tr("Close behaviour")))
         self._close_mode = self.history.settings.get("close_mode", "click")
 
         def option_row(label, mode, caption):
             row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
             rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-            btn = QPushButton(label, row)
+            btn = QPushButton(i18n.tr(label), row)
             btn.setFixedWidth(140)
             btn.clicked.connect(lambda _=False, m=mode: self._set_close_mode(m))
             rl.addWidget(btn)
-            cap = QLabel(caption, row)
+            cap = QLabel(i18n.tr(caption), row)
             cap.setWordWrap(True)
             cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
             rl.addWidget(cap, 1)
@@ -1030,16 +1076,16 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("⌨️  Shortcuts"))
+        lay.addWidget(self._heading("⌨️  " + i18n.tr("Shortcuts")))
         row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
         rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-        btn = QPushButton("Manage Shortcuts…", row)
+        btn = QPushButton(i18n.tr("Manage Shortcuts…"), row)
         btn.setFixedWidth(150)
         btn.setStyleSheet(_btn_style(C["accent"], C["accent_hover"]))
         btn.clicked.connect(self._open_shortcuts)
         rl.addWidget(btn)
         cur = self.history.settings.get("hotkey_open", "ctrl+shift+v")
-        cap = QLabel(f"Launch ClipDrop:  {cur.upper()}", row)
+        cap = QLabel(f"{i18n.tr('Launch ClipDrop:')}  {cur.upper()}", row)
         cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
         rl.addWidget(cap)
         rl.addStretch()
@@ -1059,11 +1105,11 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("🗂   History"))
+        lay.addWidget(self._heading("🗂   " + i18n.tr("History")))
 
         row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
         rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8)
-        lbl = QLabel("History size limit:", row)
+        lbl = QLabel(i18n.tr("History size limit:"), row)
         lbl.setStyleSheet(f"color:{C['text']};background:transparent;")
         rl.addWidget(lbl)
 
@@ -1076,14 +1122,14 @@ class SettingsPanel(QWidget):
             border:none;border-radius:4px;padding:4px;font-family:'Segoe UI';font-size:10pt;}}
         """)
         rl.addWidget(self._limit_edit)
-        lbl2 = QLabel("items", row); lbl2.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+        lbl2 = QLabel(i18n.tr("items"), row); lbl2.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
         rl.addWidget(lbl2)
         rl.addStretch()
         lay.addWidget(row)
 
         btn_row = QWidget(w); btn_row.setStyleSheet(f"background:{C['bg']};")
         bl = QHBoxLayout(btn_row); bl.setContentsMargins(0,0,0,0); bl.setSpacing(8)
-        save_btn = QPushButton("Save Limit", btn_row)
+        save_btn = QPushButton(i18n.tr("Save Limit"), btn_row)
         save_btn.setFixedWidth(100)
         save_btn.setStyleSheet(_btn_style(C["accent"], C["accent_hover"]))
         save_btn.clicked.connect(self._save_limit)
@@ -1094,7 +1140,7 @@ class SettingsPanel(QWidget):
         bl.addStretch()
         lay.addWidget(btn_row)
 
-        clear_btn = QPushButton("🧹  Clear All History", w)
+        clear_btn = QPushButton("🧹  " + i18n.tr("Clear All History"), w)
         clear_btn.setStyleSheet(_btn_style(C["danger"], C["danger_hover"]))
         clear_btn.clicked.connect(self._confirm_clear)
         lay.addWidget(clear_btn)
@@ -1105,8 +1151,8 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(6)
 
-        lay.addWidget(self._heading("👤  Profiles"))
-        sub = QLabel("Organise your clipboard into named workflow collections.", w)
+        lay.addWidget(self._heading("👤  " + i18n.tr("Profiles")))
+        sub = QLabel(i18n.tr("Organise your clipboard into named workflow collections."), w)
         sub.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
         lay.addWidget(sub)
 
@@ -1157,7 +1203,7 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(4)
 
-        lay.addWidget(self._heading("ℹ️   About ClipDrop"))
+        lay.addWidget(self._heading("ℹ️   " + i18n.tr("About ClipDrop")))
         for label, value in [("Version", APP_VERSION), ("Author", APP_AUTHOR),
                                ("Email", APP_EMAIL), ("Platform", "Windows")]:
             row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
@@ -1193,7 +1239,7 @@ class SettingsPanel(QWidget):
         # a "support" action, not another settings control. Opens the Paystack
         # page via the shared open_donation_page() helper (same as the footer).
         lay.addSpacing(8)
-        donate = QPushButton("🎁  Support ClipDrop", w)
+        donate = QPushButton("🎁  " + i18n.tr("Support ClipDrop"), w)
         donate.setCursor(Qt.CursorShape.PointingHandCursor)
         donate.setStyleSheet(_btn_style("#e11d6b", "#ec4899"))
         donate.clicked.connect(lambda: open_donation_page())

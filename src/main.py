@@ -56,6 +56,9 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import Qt
 from PyQt6.QtGui     import QIcon
 
+from app_paths import resource_path
+import i18n
+
 from clipboard_watcher import ClipboardWatcher
 from history_manager   import HistoryManager
 from profile_manager   import ProfileManager
@@ -89,17 +92,18 @@ def main():
 
     # App-wide window icon — taskbar, Alt+Tab, and every window's title bar.
     # Prefer the multi-size .ico (Windows picks the crispest per context),
-    # fall back to the PNG.
-    _assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "assets")
+    # fall back to the PNG. resource_path() locates them in the bundle when frozen.
     for _name in ("clipdrop.ico", "icon.png"):
-        _p = os.path.join(_assets, _name)
+        _p = resource_path("assets", _name)
         if os.path.exists(_p):
             app.setWindowIcon(QIcon(_p))
             break
 
     # Step 2: History Manager
     history = HistoryManager()
+
+    # Apply the saved UI language before any window is built.
+    i18n.set_language(history.settings.get("language", "en"))
 
     # Step 3: Profile Manager
     profiles = ProfileManager(history)

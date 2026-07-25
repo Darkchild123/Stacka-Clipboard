@@ -30,7 +30,8 @@ import shutil
 import uuid
 
 
-BASE_DIR      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from app_paths import user_data_root
+BASE_DIR      = user_data_root()
 DATA_DIR      = os.path.join(BASE_DIR, "data")
 PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
 # Per-profile image copies live here, one sub-folder per profile id.

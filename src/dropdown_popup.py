@@ -24,6 +24,7 @@ import subprocess
 import webbrowser
 
 from donate import DONATE_URL, open_donation_page
+import i18n
 
 import win32clipboard
 import win32con
@@ -981,9 +982,9 @@ class ItemRowWidget(QWidget):
             btn = _ActionButton("" if text == "pin" else text, colour, C, self)
             if text == "pin":
                 btn.setPixmap(_pin_pixmap(colour, filled=pinned))
-                btn.setToolTip("Unpin" if pinned else "Pin")
+                btn.setToolTip(i18n.tr("Unpin") if pinned else i18n.tr("Pin"))
             elif text == "✕":
-                btn.setToolTip("Remove")
+                btn.setToolTip(i18n.tr("Remove"))
             btn.clicked_signal.connect(lambda _=None, s=sig, i=self.item: s.emit(i))
             row.addWidget(btn)
 
@@ -1412,7 +1413,7 @@ class SidePanelWidget(QWidget):
         badge.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         badge.setStyleSheet("color:white;background:transparent;")
         badge.setCursor(Qt.CursorShape.PointingHandCursor)
-        badge.setToolTip("Clear selection")
+        badge.setToolTip(i18n.tr("Clear selection"))
         badge.mousePressEvent = lambda e: self._list.clearSelection()
         badge.hide()
         hl.addWidget(badge)
@@ -1515,7 +1516,7 @@ class SidePanelWidget(QWidget):
         """Show the header '✕ clear' badge while files are selected."""
         n = len(self._list.selectedItems())
         if n:
-            self._sel_badge.setText(f"✕ {n} selected")
+            self._sel_badge.setText(f"✕ {n} {i18n.tr('selected')}")
             self._sel_badge.show()
         else:
             self._sel_badge.hide()
@@ -1719,8 +1720,8 @@ class SidePanelWidget(QWidget):
             # Open / reveal first — the most common intent when browsing
             # individual files. No filesystem access while building the
             # menu; the worker checks existence off the UI thread.
-            menu.addAction("📂  Open").setData(("open", None, None))
-            menu.addAction("📁  Open containing folder").setData(("reveal", None, None))
+            menu.addAction("📂  " + i18n.tr("Open")).setData(("open", None, None))
+            menu.addAction("📁  " + i18n.tr("Open containing folder")).setData(("reveal", None, None))
             menu.addSeparator()
 
             # Send to profile ▸ — ALL profiles are valid targets here,
@@ -1733,17 +1734,17 @@ class SidePanelWidget(QWidget):
                 # Honour the side-list multi-selection: a right-click on a
                 # selected file sends EVERY selected file.
                 n = len(self._selected_targets(fp))
-                sub = menu.addMenu(f"Send {n} files to profile" if n > 1
-                                   else "Send to profile")
+                sub = menu.addMenu(i18n.tr(f"Send {n} files to profile" if n > 1
+                                   else "Send to profile"))
                 for prof in profs:
                     act = sub.addAction(prof["name"])
                     act.setData(("send", prof["id"], prof["name"]))
                 sub.addSeparator()
-                sub.addAction(f"➕  New profile with {n} files…" if n > 1
-                              else "➕  New profile…").setData(
+                sub.addAction(i18n.tr(f"➕  New profile with {n} files…" if n > 1
+                              else "➕  New profile…")).setData(
                     ("newprofile", None, None))
 
-            pin_act = menu.addAction("Unpin" if self._file_is_pinned(fp) else "Pin")
+            pin_act = menu.addAction(i18n.tr("Unpin") if self._file_is_pinned(fp) else i18n.tr("Pin"))
             pin_act.setData(("pin", None, None))
             # Two kinds of row need two kinds of Remove:
             #   • a row that IS an entry of the clip (multi-file content) —
@@ -1761,7 +1762,7 @@ class SidePanelWidget(QWidget):
                 targets = [p for p in self._sel_at_press if p in content]
                 if not (fp in targets and len(targets) > 1):
                     targets = [fp]
-                lbl = (f"Remove {len(targets)} files"
+                lbl = i18n.tr(f"Remove {len(targets)} files"
                        if len(targets) > 1 else "Remove file")
                 menu.addAction(lbl).setData(("delete", tuple(targets), None))
             else:
@@ -1769,7 +1770,7 @@ class SidePanelWidget(QWidget):
                 targets = [p for p in self._sel_at_press if p in self.files]
                 if not (fp in targets and len(targets) > 1):
                     targets = [fp]
-                lbl = (f"Remove {len(targets)} from list"
+                lbl = i18n.tr(f"Remove {len(targets)} from list"
                        if len(targets) > 1 else "Remove from list")
                 menu.addAction(lbl).setData(("hide", tuple(targets), None))
 
@@ -2471,11 +2472,11 @@ class DropdownPopup(QObject):
         fl.setSpacing(6)
         credit = QLabel("Made by Cosmas", footer)
         credit.setStyleSheet(f"color:{C['text_dim']};background:transparent;font-size:11px;")
-        support = QLabel("🎁 Support", footer)
+        support = QLabel("🎁 " + i18n.tr("Support"), footer)
         support.setStyleSheet(
             "color:#e11d6b;background:transparent;font-size:12px;font-weight:900;")
         support.setCursor(Qt.CursorShape.PointingHandCursor)
-        support.setToolTip("Support ClipDrop's development")
+        support.setToolTip(i18n.tr("Support ClipDrop's development"))
         support.mousePressEvent = lambda e: open_donation_page()
         fl.addWidget(credit)
         fl.addStretch()
@@ -2540,7 +2541,7 @@ class DropdownPopup(QObject):
             new_btn.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
             new_btn.setStyleSheet("color:#c7d2fe;background:transparent;")
             new_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            new_btn.setToolTip("Create a new profile")
+            new_btn.setToolTip(i18n.tr("Create a new profile"))
             new_btn.mousePressEvent = lambda e: self._new_profile()
             lay.addWidget(new_btn)
 
@@ -2593,7 +2594,7 @@ class DropdownPopup(QObject):
         lay.addWidget(icon)
 
         edit = QLineEdit(bar)
-        edit.setPlaceholderText("Search clipboard…")
+        edit.setPlaceholderText(i18n.tr("Search clipboard…"))
         edit.setStyleSheet(f"""
             QLineEdit {{
                 background:transparent; color:{C['text']};
@@ -2643,7 +2644,7 @@ class DropdownPopup(QObject):
         edit.setFocus(Qt.FocusReason.MouseFocusReason)
 
     def _build_empty_label(self, parent, C):
-        lbl = QLabel("No clipboard history yet.\nCopy something to get started!", parent)
+        lbl = QLabel(i18n.tr("No clipboard history yet.\nCopy something to get started!"), parent)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setFont(QFont("Segoe UI", 10))
         lbl.setStyleSheet(f"color:{C['text_dim']};background:{C['bg']};padding:24px;")
@@ -2885,9 +2886,9 @@ class DropdownPopup(QObject):
         self._populate_list(filtered)
         if self._count_lbl:
             if len(filtered) < len(self._items_all):
-                self._count_lbl.setText(f"{len(filtered)} / {len(self._items_all)} items")
+                self._count_lbl.setText(f"{len(filtered)} / {len(self._items_all)} {i18n.tr('items')}")
             else:
-                self._count_lbl.setText(f"{len(self._items_all)} items")
+                self._count_lbl.setText(f"{len(self._items_all)} {i18n.tr('items')}")
 
     # ── Profile menu ──────────────────────────────────────────────────────────
 
@@ -2925,14 +2926,14 @@ class DropdownPopup(QObject):
 
         # ── Open actions (no filesystem access here — string checks only) ──
         if item.get("type") == "url":
-            menu.addAction("🌐  Open link").setData(("openurl", str(item.get("content", ""))))
+            menu.addAction("🌐  " + i18n.tr("Open link")).setData(("openurl", str(item.get("content", ""))))
             menu.addSeparator()
         else:
             op, rev = self._openable(item)
             if op:
-                menu.addAction("📂  Open").setData(("open", op))
+                menu.addAction("📂  " + i18n.tr("Open")).setData(("open", op))
             if rev:
-                menu.addAction("📁  Open containing folder").setData(("reveal", rev))
+                menu.addAction("📁  " + i18n.tr("Open containing folder")).setData(("reveal", rev))
             if op or rev:
                 menu.addSeparator()
 
@@ -2944,8 +2945,8 @@ class DropdownPopup(QObject):
 
         # ── Send to profile ──
         if self.profiles:
-            menu.addAction(f"Send {len(sel)} items to profile…" if multi
-                           else "Send to profile…").setEnabled(False)
+            menu.addAction(i18n.tr(f"Send {len(sel)} items to profile…" if multi
+                           else "Send to profile…")).setEnabled(False)
             # Every profile EXCEPT the one currently shown (sending an item to
             # the profile you're looking at is a no-op). General included.
             active_id = self.profiles.get_active_profile()["id"]
@@ -2953,13 +2954,13 @@ class DropdownPopup(QObject):
                 if prof["id"] == active_id:
                     continue
                 menu.addAction(prof["name"]).setData(("send", prof["id"]))
-            menu.addAction(f"➕  New profile with {len(sel)} items…" if multi
-                           else "➕  New profile…").setData(("newprofile", None))
+            menu.addAction(i18n.tr(f"➕  New profile with {len(sel)} items…" if multi
+                           else "➕  New profile…")).setData(("newprofile", None))
 
         # ── Remove — the whole selection when the clicked row is in it. ──
         if not menu.isEmpty():
             menu.addSeparator()
-        menu.addAction(f"Remove {len(sel)} items" if multi else "Remove") \
+        menu.addAction(i18n.tr(f"Remove {len(sel)} items" if multi else "Remove")) \
             .setData(("delete", None))
 
         if menu.isEmpty():
@@ -3189,7 +3190,7 @@ class DropdownPopup(QObject):
                 if not items:
                     self._build_empty_label(self._list_container, self._colours)
                 if self._count_lbl:
-                    self._count_lbl.setText(f"{len(items)} items")
+                    self._count_lbl.setText(f"{len(items)} {i18n.tr('items')}")
 
             # Header profile name (active profile may have changed)
             if getattr(self, "_prof_btn", None) is not None and self.profiles:
@@ -3314,11 +3315,11 @@ class DropdownPopup(QObject):
         try:
             n = len(self._selected_ids)
             if n:
-                lbl.setText(f"✕  {n} selected")
+                lbl.setText(f"✕  {n} {i18n.tr('selected')}")
                 lbl.setStyleSheet("color:#ffffff;background:transparent;"
                                   "font-weight:bold;")
                 lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-                lbl.setToolTip("Clear selection")
+                lbl.setToolTip(i18n.tr("Clear selection"))
             else:
                 lbl.setText(f"{len(getattr(self, '_items_all', []) or [])} items")
                 lbl.setStyleSheet("color:#c7d2fe;background:transparent;")

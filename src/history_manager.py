@@ -13,9 +13,11 @@ from PIL import Image
 
 
 # --- File paths for saving data ---
-# os.path.dirname(__file__) means "the folder this file is in" (src/)
-# We then go one level up (..) to reach the project root
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# app_paths.user_data_root() is the project root in dev, but %APPDATA%\ClipDrop
+# when running as the packaged app — so an installed copy writes history and
+# settings to a per-user, writable location instead of next to the exe.
+from app_paths import user_data_root
+BASE_DIR = user_data_root()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SETTINGS_DIR = os.path.join(BASE_DIR, "settings")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")

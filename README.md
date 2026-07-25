@@ -216,6 +216,7 @@ ClipDrop/
 - [x] Adjustable UI sizing (window, rows, side list) in 10% steps
 - [x] Credit card detection — masked display, encrypted at rest (Windows DPAPI)
 - [x] Open files / folders / links straight from the list (right-click)
+- [x] Localisation — in-app language picker; 6 languages (French, Spanish, Italian, Russian, Chinese, Korean) plus English
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -449,6 +450,8 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-22 | Overlay button rewritten to position from the cursor — sits opposite the menu's growth quadrant and escapes past long / re-centred menus, raising above in-page menus when overlap is unavoidable; the three-tier menu detection (and the comtypes dependency) removed |
 | 2026-07-22 | Combined popup triggers — enable up to two at once (e.g. overlay button + double right-click); “Hotkey only” stays exclusive |
 | 2026-07-22 | Credit card detection (whole-clipboard) — regex + BIN/brand + Luhn checksum identify a copied card; the list shows a masked “Visa •••• 4242”, the real number is DPAPI-encrypted at rest and only decrypted in memory to paste |
+| 2026-07-25 | Windows packaging begun — standalone PyInstaller `.exe`; runtime paths made install-safe (user data → `%APPDATA%`, assets read from the bundle), and the ClipDrop icon added to the tray, taskbar, and windows |
+| 2026-07-25 | Localisation — in-app translation engine with a language picker in the Settings header; 6 languages added (French, Spanish, Italian, Russian, Chinese, Korean) covering Settings, the popup and its context menus, the tray menu, and the support buttons |
 
 ---
 

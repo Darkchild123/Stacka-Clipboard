@@ -16,8 +16,10 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PyQt6.QtGui     import QIcon, QPixmap, QImage, QAction
 from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject
 
-BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
+from app_paths import resource_path
+import i18n
+
+ICON_PATH = resource_path("assets", "icon.png")
 
 
 def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
@@ -51,7 +53,7 @@ class TrayIcon:
     def _create_tray(self):
         # Prefer the multi-size .ico (crisp at the small tray sizes); fall back
         # to the PIL-loaded icon.png / generated placeholder.
-        ico = os.path.join(BASE_DIR, "assets", "clipdrop.ico")
+        ico = resource_path("assets", "clipdrop.ico")
         if os.path.exists(ico):
             icon = QIcon(ico)
         else:
@@ -78,14 +80,14 @@ class TrayIcon:
         self._profile_action.setEnabled(False)
         menu.addSeparator()
 
-        settings_act = menu.addAction("⚙  Settings")
+        settings_act = menu.addAction("⚙  " + i18n.tr("Settings"))
         settings_act.triggered.connect(self._open_settings)
 
-        clear_act = menu.addAction("🧹 Clear History")
+        clear_act = menu.addAction("🧹 " + i18n.tr("Clear History"))
         clear_act.triggered.connect(self._clear_history)
         menu.addSeparator()
 
-        quit_act = menu.addAction("✖  Quit ClipDrop")
+        quit_act = menu.addAction("✖  " + i18n.tr("Quit ClipDrop"))
         quit_act.triggered.connect(self._quit)
 
         # Refresh profile label each time menu opens
@@ -96,9 +98,9 @@ class TrayIcon:
 
     def _profile_label(self) -> str:
         try:
-            return f"Profile: {self.profiles.get_active_profile()['name']}"
+            return f"{i18n.tr('Profile:')} {self.profiles.get_active_profile()['name']}"
         except Exception:
-            return "Profile: General"
+            return f"{i18n.tr('Profile:')} General"
 
     def _refresh_profile_action(self):
         if self._profile_action:
@@ -129,7 +131,7 @@ class TrayIcon:
         if self._tray:
             self._tray.showMessage(
                 "ClipDrop",
-                "Clipboard history has been cleared.",
+                i18n.tr("Clipboard history has been cleared."),
                 QSystemTrayIcon.MessageIcon.Information,
                 2000
             )
