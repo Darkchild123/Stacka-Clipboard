@@ -16,6 +16,7 @@ from PIL import Image
 # app_paths.user_data_root() is the project root in dev, but %APPDATA%\ClipDrop
 # when running as the packaged app — so an installed copy writes history and
 # settings to a per-user, writable location instead of next to the exe.
+import secure_store
 from app_paths import user_data_root
 BASE_DIR = user_data_root()
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -402,37 +403,22 @@ class HistoryManager:
 
     def _save_history(self):
         """
-        Saves the current history list to history.json using an atomic write.
+        Saves the current history list to history.json, ENCRYPTED AT REST.
 
-        Writes to a .tmp file first, then os.replace() atomically promotes it.
-        A .bak copy is kept so _load_history() can recover from corruption.
+        secure_store.write_json keeps the original atomic strategy (.tmp →
+        fsync → .bak → os.replace) and DPAPI-encrypts the JSON, so the stored
+        clipboard is unreadable to another Windows user or if the file is
+        copied off the machine. See secure_store.py for scope and limits.
         """
-        try:
-            tmp_path = HISTORY_FILE + ".tmp"
-            bak_path = HISTORY_FILE + ".bak"
-
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.items, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-            if os.path.exists(HISTORY_FILE):
-                try:
-                    import shutil
-                    shutil.copy2(HISTORY_FILE, bak_path)
-                except Exception:
-                    pass
-
-            os.replace(tmp_path, HISTORY_FILE)
-
-        except Exception as e:
-            print(f"Failed to save history: {e}")
+        secure_store.write_json(HISTORY_FILE, self.items)
 
 
     def _load_history(self):
         """
         Loads history from history.json.
-        Falls back to history.json.bak if the main file is corrupt.
+        Reads BOTH the encrypted format and legacy plaintext (an existing
+        plaintext history is migrated on the next save). Falls back to
+        history.json.bak if the main file is corrupt or undecryptable.
         """
         bak_path = HISTORY_FILE + ".bak"
 
@@ -440,8 +426,9 @@ class HistoryManager:
             if not os.path.exists(path):
                 continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = secure_store.read_json(path)
+                if data is None:
+                    raise ValueError("unreadable")
                 if path == bak_path:
                     print("History recovered from backup.")
                 return data

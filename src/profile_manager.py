@@ -30,6 +30,7 @@ import shutil
 import uuid
 
 
+import secure_store
 from app_paths import user_data_root
 BASE_DIR      = user_data_root()
 DATA_DIR      = os.path.join(BASE_DIR, "data")
@@ -425,30 +426,11 @@ class ProfileManager:
         half-written (corrupt) state.  A backup copy (.bak) is also kept so
         _load() can recover from any remaining edge-case corruption.
         """
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            tmp_path = PROFILES_FILE + ".tmp"
-            bak_path = PROFILES_FILE + ".bak"
-            payload  = {"active_id": self.active_id, "profiles": self.profiles}
-
-            # Write to temp file — if this fails, the real file is untouched
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-            # Back up the current good file before replacing it
-            if os.path.exists(PROFILES_FILE):
-                try:
-                    shutil.copy2(PROFILES_FILE, bak_path)
-                except Exception:
-                    pass   # backup failure is non-fatal
-
-            # Atomic replace — tmp becomes the live file
-            os.replace(tmp_path, PROFILES_FILE)
-
-        except Exception as e:
-            print(f"Failed to save profiles: {e}")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        payload = {"active_id": self.active_id, "profiles": self.profiles}
+        # Encrypted at rest (DPAPI) with the same atomic .tmp → .bak →
+        # os.replace strategy. See secure_store.py.
+        secure_store.write_json(PROFILES_FILE, payload)
 
 
     def _load(self):
@@ -469,8 +451,9 @@ class ProfileManager:
             if not os.path.exists(path):
                 continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = secure_store.read_json(path)
+                if data is None:
+                    raise ValueError("unreadable")
 
                 self.profiles = data.get("profiles", self._default_profiles())
                 saved_id      = data.get("active_id", GENERAL_ID)
