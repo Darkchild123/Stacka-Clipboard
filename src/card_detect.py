@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - card_detect.py
+# Stacka - card_detect.py
 # ============================================================
 # Detects credit / debit card numbers in copied text and protects
 # them: the real number is NEVER stored in the clear — it is
@@ -104,10 +104,10 @@ def encrypt(plaintext: str) -> str:
         import win32crypt
         import base64
         blob = win32crypt.CryptProtectData(
-            plaintext.encode("utf-8"), "clipdrop-card", None, None, None, 0)
+            plaintext.encode("utf-8"), "stacka-card", None, None, None, 0)
         return base64.b64encode(blob).decode("ascii")
     except Exception as e:
-        print(f"[ClipDrop] Card encryption failed: {e}")
+        print(f"[Stacka] Card encryption failed: {e}")
         return ""
 
 
@@ -121,5 +121,5 @@ def decrypt(enc_b64: str):
         _desc, plain = win32crypt.CryptUnprotectData(blob, None, None, None, 0)
         return plain.decode("utf-8")
     except Exception as e:
-        print(f"[ClipDrop] Card decryption failed: {e}")
+        print(f"[Stacka] Card decryption failed: {e}")
         return None

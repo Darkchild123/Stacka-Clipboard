@@ -1,7 +1,7 @@
 # ============================================================
-# ClipDrop - settings_panel.py  (PyQt6 rewrite)
+# Stacka - settings_panel.py  (PyQt6 rewrite)
 # ============================================================
-# Settings window — lets the user control ClipDrop behaviour.
+# Settings window — lets the user control Stacka behaviour.
 # Opened from the system tray icon menu.
 # ============================================================
 
@@ -19,11 +19,11 @@ import math
 
 from donate import DONATE_URL, open_donation_page
 
-APP_NAME    = "ClipDrop"
+APP_NAME    = "Stacka"
 APP_VERSION = "1.0.0"
 APP_AUTHOR  = "Cosmas Nwachukwu"
 APP_EMAIL   = "finecosmas@gmail.com"
-GITHUB_URL  = "https://github.com/Darkchild123/Project-ClipDrop"
+GITHUB_URL  = "https://github.com/Darkchild123/Stacka-Clipboard"
 GITHUB_PROFILE_URL = "https://github.com/Darkchild123"
 
 DARK = {
@@ -114,7 +114,7 @@ try:
     from context_menu import SHORTCUT_DEFS
 except Exception:   # import edge in isolated tests
     SHORTCUT_DEFS = [
-        ("hotkey_open", "Open ClipDrop popup window", "ctrl+shift+v"),
+        ("hotkey_open", "Open Stacka popup window", "ctrl+shift+v"),
     ]
 
 # Combos already taken by Windows or near-universal app functions.
@@ -156,7 +156,7 @@ class ShortcutsWindow(QWidget):
 
     Lists every entry of SHORTCUT_DEFS with a key-capture field, per-row
     reset, and a Save that re-binds live through the running ContextMenu
-    (via the app-level 'clipdrop_context' property).
+    (via the app-level 'stacka_context' property).
     """
 
     def __init__(self, history_manager, parent=None):
@@ -183,7 +183,7 @@ class ShortcutsWindow(QWidget):
         self._pulse.setLoopCount(-1)
         self._pulse.valueChanged.connect(self._on_pulse)
 
-        self.setWindowTitle("ClipDrop Shortcuts")
+        self.setWindowTitle("Stacka Shortcuts")
         self.setFixedWidth(470)
         self._build()
 
@@ -382,14 +382,14 @@ class ShortcutsWindow(QWidget):
 
     def _check_conflicts(self, key: str):
         """Warn immediately when a freshly captured combo is already
-        assigned to another ClipDrop action (field turns red) or is a
+        assigned to another Stacka action (field turns red) or is a
         well-known Windows / app shortcut (warning only)."""
         combo  = self._combo_of(key)
         pretty = self._edits[key].keySequence().toString()
         if not combo:
             self._mark_edit(key, conflict=False)
             return
-        # Taken by another ClipDrop action?
+        # Taken by another Stacka action?
         for other, _lbl, _d in SHORTCUT_DEFS:
             if other != key and self._combo_of(other) == combo:
                 self._mark_edit(key, conflict=True)
@@ -433,7 +433,7 @@ class ShortcutsWindow(QWidget):
         # Pass 2: re-bind live. Empty combo → unbind the action. On a bind
         # failure the old binding is restored by set_hotkey; nothing further
         # is saved.
-        ctx = QApplication.instance().property("clipdrop_context")
+        ctx = QApplication.instance().property("stacka_context")
         for key, (combo, seq) in combos.items():
             if ctx is not None:
                 if not ctx.set_hotkey(key, combo):     # combo="" → unbind
@@ -463,7 +463,7 @@ class SettingsPanel(QWidget):
         self.C        = DARK if self._theme == "dark" else LIGHT
         self._shortcuts_win = None   # keep reference — prevents GC close
 
-        self.setWindowTitle("ClipDrop Settings")
+        self.setWindowTitle("Stacka Settings")
         self.setFixedWidth(420)
         self.setWindowOpacity(history_manager.settings.get("transparency", 1.0))
 
@@ -493,7 +493,7 @@ class SettingsPanel(QWidget):
 
     def eventFilter(self, obj, event):
         # A minimized window is still isVisible() in Qt terms — clicking
-        # another ClipDrop window must not close a minimized settings panel.
+        # another Stacka window must not close a minimized settings panel.
         if (event.type() == QEvent.Type.MouseButtonPress
                 and self.isVisible() and not self.isMinimized()):
             try:
@@ -535,7 +535,7 @@ class SettingsPanel(QWidget):
         main.setSpacing(0)
 
         # Header — gradient surface with a dark seam (raised 3D look)
-        hdr = QLabel("📋  ClipDrop Settings", self)
+        hdr = QLabel("📋  Stacka Settings", self)
         hdr.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hdr.setFixedHeight(48)
@@ -707,22 +707,22 @@ class SettingsPanel(QWidget):
     # (mode key, button label, one-line caption)
     TRIGGER_MODES = [
         ("double_right", "🖱  Double right-click",
-         "Right-click twice quickly to open ClipDrop at the cursor. "
+         "Right-click twice quickly to open Stacka at the cursor. "
          "One hand, never covers the app's own menu."),
         ("middle", "🖱  Middle-click",
-         "Press the scroll wheel to open ClipDrop. One hand, no menu flash. "
+         "Press the scroll wheel to open Stacka. One hand, no menu flash. "
          "Overrides middle-click's usual open-in-new-tab / autoscroll."),
         ("side", "⏪  Mouse side button",
-         "Use a thumb Back/Forward button to open ClipDrop. "
+         "Use a thumb Back/Forward button to open Stacka. "
          "Needs a mouse with side buttons."),
         ("ctrl_right", "⌨  Ctrl + right-click",
-         "Hold Ctrl and right-click to open ClipDrop. Plain right-click "
+         "Hold Ctrl and right-click to open Stacka. Plain right-click "
          "stays normal. No menu flash."),
         ("button", "🔘  Overlay button",
-         "A “Paste from ClipDrop” button appears beside the cursor on "
+         "A “Paste from Stacka” button appears beside the cursor on "
          "every right-click."),
         ("hotkey", "⌨  Hotkey only",
-         "No mouse trigger — open ClipDrop only with your keyboard "
+         "No mouse trigger — open Stacka only with your keyboard "
          "shortcut (see Shortcuts)."),
     ]
 
@@ -852,7 +852,7 @@ class SettingsPanel(QWidget):
         self._size_timer.start(180)
 
     ICON_PACKS = [
-        ("default", "🎨  Default ClipDrop",
+        ("default", "🎨  Default Stacka",
          "Colourful modern icons — Office letter tiles, the Python logo, "
          "gears, and more."),
         ("labeled", "🏷  Labeled documents",
@@ -1039,7 +1039,7 @@ class SettingsPanel(QWidget):
         btn.clicked.connect(self._open_shortcuts)
         rl.addWidget(btn)
         cur = self.history.settings.get("hotkey_open", "ctrl+shift+v")
-        cap = QLabel(f"Launch ClipDrop:  {cur.upper()}", row)
+        cap = QLabel(f"Launch Stacka:  {cur.upper()}", row)
         cap.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;background:transparent;")
         rl.addWidget(cap)
         rl.addStretch()
@@ -1157,7 +1157,7 @@ class SettingsPanel(QWidget):
         w = QWidget(self); w.setStyleSheet(f"background:{C['bg']};")
         lay = QVBoxLayout(w); lay.setContentsMargins(0,8,0,8); lay.setSpacing(4)
 
-        lay.addWidget(self._heading("ℹ️   About ClipDrop"))
+        lay.addWidget(self._heading("ℹ️   About Stacka"))
         for label, value in [("Version", APP_VERSION), ("Author", APP_AUTHOR),
                                ("Email", APP_EMAIL), ("Platform", "Windows")]:
             row = QWidget(w); row.setStyleSheet(f"background:{C['bg']};")
@@ -1193,7 +1193,7 @@ class SettingsPanel(QWidget):
         # a "support" action, not another settings control. Opens the Paystack
         # page via the shared open_donation_page() helper (same as the footer).
         lay.addSpacing(8)
-        donate = QPushButton("🎁  Support ClipDrop", w)
+        donate = QPushButton("🎁  Support Stacka", w)
         donate.setCursor(Qt.CursorShape.PointingHandCursor)
         donate.setStyleSheet(_btn_style("#e11d6b", "#ec4899"))
         donate.clicked.connect(lambda: open_donation_page())
@@ -1255,7 +1255,7 @@ class SettingsPanel(QWidget):
         gradient, scrollbars), which needs the popup's full rebuild path —
         plain data refreshes stay in-place and flicker-free."""
         try:
-            popup = QApplication.instance().property("clipdrop_popup")
+            popup = QApplication.instance().property("stacka_popup")
             if popup is not None and getattr(popup, "_popup", None):
                 popup._refresh(full=True)
         except Exception:
@@ -1271,7 +1271,7 @@ class SettingsPanel(QWidget):
         # Live-apply to the open popup while the slider drags — a direct
         # opacity set, no rebuild needed, so it tracks smoothly.
         try:
-            popup = QApplication.instance().property("clipdrop_popup")
+            popup = QApplication.instance().property("stacka_popup")
             if popup is not None and getattr(popup, "_popup", None):
                 popup._popup.setWindowOpacity(opacity)
         except Exception:

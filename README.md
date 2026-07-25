@@ -1,4 +1,4 @@
-# ClipDrop 📋
+# Stacka Clipboard 📋
 
 > A lightweight Windows clipboard manager that lets you copy multiple items, organize them your way, and choose exactly what to paste — right where your cursor is.
 
@@ -23,7 +23,7 @@
 
 ## Overview
 
-**ClipDrop** is a Windows clipboard manager built for everyday users who copy and paste frequently. It runs silently in the background, saves everything you copy, and gives you a clean dropdown list — right at your cursor — so you can choose exactly what to paste.
+**Stacka** is a Windows clipboard manager built for everyday users who copy and paste frequently. It runs silently in the background, saves everything you copy, and gives you a clean dropdown list — right at your cursor — so you can choose exactly what to paste.
 
 Built from scratch as a personal software development project by a first-time developer with a great idea.
 
@@ -41,11 +41,11 @@ Windows (and most operating systems) only remember **one copied item at a time**
 
 ## The Solution
 
-ClipDrop solves this by:
+Stacka solves this by:
 
 1. **Silently monitoring** everything you copy in the background
 2. **Saving a history** of copied items (text, files, and images)
-3. **Injecting a "Paste from ClipDrop"** option into the Windows right-click context menu
+3. **Injecting a "Paste from Stacka"** option into the Windows right-click context menu
 4. **Displaying a popup dropdown** right at your cursor position when triggered
 5. Letting you **click any item** to paste it instantly
 
@@ -56,7 +56,7 @@ ClipDrop solves this by:
 | Feature | Description |
 |---|---|
 | 📋 Clipboard Monitoring | Automatically captures text, files, and images as you copy |
-| 🖱️ Right-Click Integration | Adds "Paste from ClipDrop" to the Windows context menu |
+| 🖱️ Right-Click Integration | Adds "Paste from Stacka" to the Windows context menu |
 | 📍 Cursor-Position Dropdown | Popup list appears exactly where your mouse cursor is |
 | 👁️ Item Previews | First few words for text, icon for files, thumbnail for images |
 | 🔁 Smart Deduplication | Copying the same item again moves it to the top — no duplicates |
@@ -68,7 +68,7 @@ ClipDrop solves this by:
 | 🧹 Clear All History | One-click clear from Settings or tray menu |
 | ↕️ Reorder Items | Manually move items up or down the list to suit your workflow |
 | 🔍 Source Tracking | Each item shows where it was copied from — file path, directory, or URL |
-| 🖐️ Draggable Popup | Drag the ClipDrop popup by its header to reposition it anywhere on screen |
+| 🖐️ Draggable Popup | Drag the Stacka popup by its header to reposition it anywhere on screen |
 
 ---
 
@@ -79,11 +79,11 @@ ClipDrop solves this by:
 ```
 User copies something (text / file / image)
         ↓
-ClipDrop silently saves it to history
+Stacka silently saves it to history
         ↓
 User right-clicks anywhere (e.g. in a text editor, browser, file explorer)
         ↓
-"Paste from ClipDrop" appears in the context menu
+"Paste from Stacka" appears in the context menu
         ↓
 User clicks it → dropdown popup appears at cursor position
         ↓
@@ -119,7 +119,7 @@ Items in the dropdown can be manually rearranged — move any item up or down th
 ## App Structure
 
 ```
-ClipDrop/
+Stacka/
 │
 ├── src/                        # All source code
 │   ├── main.py                 # App entry point
@@ -208,7 +208,7 @@ ClipDrop/
 - [x] Content counts on multi-file and folder rows
 - [x] In-app toast notifications for every action
 - [x] Ctrl+click multi-selection with combined paste (all lists)
-- [x] Drag & drop items out of ClipDrop into any app
+- [x] Drag & drop items out of Stacka into any app
 - [x] Snippet scratchpad — type a note, save it straight into history
 - [x] Pause/resume capture, clear history, and profile cycling by hotkey
 - [x] Six selectable trigger modes (mouse gestures, hotkey, or overlay button)
@@ -226,18 +226,18 @@ ClipDrop/
 ## Known Limitations
 
 These are inherent to how Windows secures and renders the desktop — not
-bugs, but constraints ClipDrop works within.
+bugs, but constraints Stacka works within.
 
 ### Apps running as Administrator
 
 Windows' User Interface Privilege Isolation (UIPI) forbids a normal-
 privilege process from inspecting, hooking, or drawing over a window
-owned by a **higher-privilege** process. So when ClipDrop runs normally
-(the recommended way), its "Paste from ClipDrop" overlay button will
+owned by a **higher-privilege** process. So when Stacka runs normally
+(the recommended way), its "Paste from Stacka" overlay button will
 **not appear** over apps launched as Administrator — an elevated
 Terminal, Task Manager, or an IDE run as admin. The clipboard itself
 still works everywhere; only the right-click overlay is blocked for
-those windows. Running ClipDrop itself as Administrator lifts the
+those windows. Running Stacka itself as Administrator lifts the
 restriction, at the cost of the app starting elevated.
 
 ### Context menus the overlay can't measure
@@ -254,7 +254,7 @@ trigger — or use a gesture alone — if an app's menus fight it.
 
 ### Distribution note — code signing
 
-ClipDrop uses a low-level mouse hook (`SetWindowsHookEx`) for its
+Stacka uses a low-level mouse hook (`SetWindowsHookEx`) for its
 system-wide right-click detection. This is legitimate, but unsigned
 executables using such hooks can trip antivirus heuristics. Before the
 Microsoft Store release the packaged `.exe` must be **digitally signed**
@@ -265,7 +265,7 @@ AV recognise it as trusted.
 
 ## Known Issues
 
-These bugs were discovered during the first live test of ClipDrop v1.0 and are actively being worked on:
+These bugs were discovered during the first live test of Stacka v1.0 and are actively being worked on:
 
 ---
 
@@ -291,7 +291,7 @@ The popup was restructured to use `Toplevel` — a child window of a single shar
 **Status:** ✅ Resolved
 
 **What happened:**
-After the popup fix, the system tray icon stopped appearing. ClipDrop launched but showed no tray icon, making it impossible to access settings or quit the app cleanly.
+After the popup fix, the system tray icon stopped appearing. Stacka launched but showed no tray icon, making it impossible to access settings or quit the app cleanly.
 
 **Root cause:**
 `tkinter` and `pystray` (the tray icon library) both require ownership of the main thread to run their event loops. They were fighting each other — whichever started second would fail silently.
@@ -308,33 +308,33 @@ The app architecture was restructured so that `tkinter` exclusively owns the mai
 **Status:** ✅ Resolved
 
 **What happened:**
-Copying a file and selecting it from the ClipDrop popup did nothing — the file was not pasted into the destination.
+Copying a file and selecting it from the Stacka popup did nothing — the file was not pasted into the destination.
 
 **Root cause — wrong binary structure:**
 Windows requires file clipboard data (`CF_HDROP`) in a precise binary format called a `DROPFILES` structure — a 20-byte header followed by Unicode file paths each separated by null characters. The original code packed the header as 24 bytes (6 integers) instead of the correct 20 bytes (5 integers), causing Windows to silently reject the data.
 
 **Root cause — clipboard loop:**
-When ClipDrop restored the file path to the clipboard before pasting, the clipboard watcher detected this as a new copy event and tried to save it as a new history item — interfering with the paste operation.
+When Stacka restored the file path to the clipboard before pasting, the clipboard watcher detected this as a new copy event and tried to save it as a new history item — interfering with the paste operation.
 
 **How it was fixed:**
-The `DROPFILES` header was corrected to exactly 20 bytes using `struct.pack("<5I", 20, 0, 0, 0, 1)`. A `paused` flag was added to the clipboard watcher — the watcher skips checking while ClipDrop is performing a paste, then automatically resumes after 0.5 seconds, preventing the loop.
+The `DROPFILES` header was corrected to exactly 20 bytes using `struct.pack("<5I", 20, 0, 0, 0, 1)`. A `paused` flag was added to the clipboard watcher — the watcher skips checking while Stacka is performing a paste, then automatically resumes after 0.5 seconds, preventing the loop.
 
 **Files changed:** `src/dropdown_popup.py`, `src/clipboard_watcher.py`
 
 ---
 
-### 🐛 Bug 4 — "Paste from ClipDrop" Only Appears on the Desktop
+### 🐛 Bug 4 — "Paste from Stacka" Only Appears on the Desktop
 
 **Status:** ✅ Resolved
 
 **What happened:**
-The "Paste from ClipDrop" option appeared correctly when right-clicking on the Desktop or inside File Explorer. It did not appear when right-clicking inside applications such as Notepad, browsers, or HTML forms.
+The "Paste from Stacka" option appeared correctly when right-clicking on the Desktop or inside File Explorer. It did not appear when right-clicking inside applications such as Notepad, browsers, or HTML forms.
 
 **Root cause:**
 Windows has two separate types of right-click menus. The Windows Registry approach only covers the Windows Shell — the Desktop and File Explorer. Applications like Notepad, Chrome, and Word build their own right-click menus independently and do not allow external injection via the Registry.
 
 **How it was fixed:**
-A low-level Windows mouse hook (`WH_MOUSE_LL`) was implemented using the Windows API via Python's `ctypes` library. This hook detects every right-click system-wide — in any application, browser, text editor, or HTML form. When a right-click is detected, a small floating **"📋 Paste from ClipDrop"** button appears near the cursor. The native right-click menu still opens as normal. Clicking the button opens the ClipDrop popup. The button auto-disappears after 3 seconds if not clicked. The `Ctrl+Shift+V` hotkey remains available as a keyboard alternative.
+A low-level Windows mouse hook (`WH_MOUSE_LL`) was implemented using the Windows API via Python's `ctypes` library. This hook detects every right-click system-wide — in any application, browser, text editor, or HTML form. When a right-click is detected, a small floating **"📋 Paste from Stacka"** button appears near the cursor. The native right-click menu still opens as normal. Clicking the button opens the Stacka popup. The button auto-disappears after 3 seconds if not clicked. The `Ctrl+Shift+V` hotkey remains available as a keyboard alternative.
 
 **Files changed:** `src/context_menu.py`
 
@@ -362,7 +362,7 @@ Explicit `argtypes` and `restype` were declared for every Windows API call invol
 **Status:** ✅ Resolved
 
 **What happened:**
-When the floating "📋 Paste from ClipDrop" button appeared after a right-click, the native context menu would immediately flash and disappear, leaving only the ClipDrop button on screen.
+When the floating "📋 Paste from Stacka" button appeared after a right-click, the native context menu would immediately flash and disappear, leaving only the Stacka button on screen.
 
 **Root cause:**
 `focus_force()` was being called on the overlay window after it appeared. Windows closes a context menu the instant it loses focus. Calling `focus_force()` on our overlay stole focus away from the context menu, causing Windows to close it immediately.
@@ -379,7 +379,7 @@ Removed `focus_force()` from the overlay display logic entirely. The overlay but
 **Status:** ✅ Resolved
 
 **What happened:**
-The floating "📋 Paste from ClipDrop" button was appearing on top of the native context menu in many apps, making both hard to use.
+The floating "📋 Paste from Stacka" button was appearing on top of the native context menu in many apps, making both hard to use.
 
 **Root cause — timing:**
 The context menu window search ran immediately on the main thread. Many apps take longer than 120ms to render their context menu, so the search returned nothing and the fallback placed the button near the cursor — right where the menu had just appeared.
@@ -397,20 +397,20 @@ Three separate fixes were applied. First, the context menu search was moved to a
 
 ---
 
-### 🐛 Bug 8 — "Paste from ClipDrop" in Explorer Does Nothing
+### 🐛 Bug 8 — "Paste from Stacka" in Explorer Does Nothing
 
 **Status:** ✅ Resolved
 
 **What happened:**
-Clicking "Paste from ClipDrop" from the Windows Desktop or File Explorer right-click menu produced no response — no popup appeared and no error was shown.
+Clicking "Paste from Stacka" from the Windows Desktop or File Explorer right-click menu produced no response — no popup appeared and no error was shown.
 
 **Root cause:**
-The Windows Registry command correctly fired when clicked, writing a signal file (`clipdrop.signal`) to the temp folder containing the cursor position. However, the running ClipDrop app had no code watching for that file. The signal was written and silently ignored.
+The Windows Registry command correctly fired when clicked, writing a signal file (`stacka.signal`) to the temp folder containing the cursor position. However, the running Stacka app had no code watching for that file. The signal was written and silently ignored.
 
 A secondary issue was that `pyautogui.position()` writes its output as `Point(x=1204, y=540)` rather than a plain `(1204, 540)` tuple string, causing the position parser to crash when it eventually was implemented.
 
 **How it was fixed:**
-A background thread (`_watch_signal_file`) was added to `context_menu.py`. It polls the temp folder every 200ms for the signal file. When found, it reads the position using regex to correctly parse the `Point(x=..., y=...)` format, deletes the file, and triggers the ClipDrop popup at that position.
+A background thread (`_watch_signal_file`) was added to `context_menu.py`. It polls the temp folder every 200ms for the signal file. When found, it reads the position using regex to correctly parse the `Point(x=..., y=...)` format, deletes the file, and triggers the Stacka popup at that position.
 
 **Files changed:** `src/context_menu.py`
 
@@ -432,7 +432,7 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-05-24 | App confirmed working — right-click overlay, hotkey, tray icon all stable |
 | 2026-05-25 | Bug 6 fixed — overlay no longer closes native context menu (removed focus_force) |
 | 2026-05-25 | Bug 7 fixed — overlay button positioning overhauled with retry logic, border math, and dead zone handling |
-| 2026-05-25 | Bug 8 fixed — "Paste from ClipDrop" in Explorer now triggers popup via signal file watcher |
+| 2026-05-25 | Bug 8 fixed — "Paste from Stacka" in Explorer now triggers popup via signal file watcher |
 | 2026-05-30 | UI framework migrated from tkinter to PyQt6 — all 5 UI files rewritten |
 | 2026-07-19 | Stability pass — threaded paste, crash fixes, popup persistence, side-panel actions, live settings |
 | 2026-07-20 | Visual overhaul — floating rounded cards with shadows, gradient surfaces, accent scrollbars, fluid hover motion, live in-place updates |
@@ -449,12 +449,13 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-22 | Overlay button rewritten to position from the cursor — sits opposite the menu's growth quadrant and escapes past long / re-centred menus, raising above in-page menus when overlap is unavoidable; the three-tier menu detection (and the comtypes dependency) removed |
 | 2026-07-22 | Combined popup triggers — enable up to two at once (e.g. overlay button + double right-click); “Hotkey only” stays exclusive |
 | 2026-07-22 | Credit card detection (whole-clipboard) — regex + BIN/brand + Luhn checksum identify a copied card; the list shows a masked “Visa •••• 4242”, the real number is DPAPI-encrypted at rest and only decrypted in memory to paste |
+| 2026-07-25 | Renamed to Stacka — the original name conflicted with an existing commercial product, so the app, its documentation and its Windows integration were renamed before release |
 
 ---
 
 ## About This Project
 
-ClipDrop is being built by **Cosmas** as a first software development project — going from idea to a working, polished application. The goal is to learn by building something genuinely useful.
+Stacka is being built by **Cosmas** as a first software development project — going from idea to a working, polished application. The goal is to learn by building something genuinely useful.
 
 ---
 
@@ -464,7 +465,7 @@ ClipDrop is being built by **Cosmas** as a first software development project �
 
 ## License
 
-ClipDrop is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** as published by the Free Software Foundation. See the [LICENSE](LICENSE) file for the full text.
+Stacka is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3.0** as published by the Free Software Foundation. See the [LICENSE](LICENSE) file for the full text.
 
 Copyright © 2026 Cosmas Nwachukwu
 
@@ -516,7 +517,7 @@ PyQt6 solves every one of these issues natively:
 - **Native Windows integration** — `QSystemTrayIcon`, `QMenu`, clipboard API, hotkey registration all built-in.
 - **Borderless windows** — `Qt.FramelessWindowHint` works correctly on Windows without the focus issues of `overrideredirect`.
 
-PyQt6 was chosen over alternatives (Dear PyGui, Flet, Kivy, wxPython) because ClipDrop is a Windows OS utility that requires deep native integration — system tray, clipboard API, global hotkeys, and borderless cursor-positioned windows — all of which PyQt6 handles natively.
+PyQt6 was chosen over alternatives (Dear PyGui, Flet, Kivy, wxPython) because Stacka is a Windows OS utility that requires deep native integration — system tray, clipboard API, global hotkeys, and borderless cursor-positioned windows — all of which PyQt6 handles natively.
 
 ---
 
@@ -587,10 +588,10 @@ project-wide: never destroy a widget tree from inside its own event
 handler.
 
 **Popup closing on its own menus.** The global click monitor treated
-clicks in ClipDrop's *other* windows (side panels, context menus) as
+clicks in Stacka's *other* windows (side panels, context menus) as
 "outside" clicks and hid the popup — each new window type reintroduced
 the bug. The hit test now asks Windows which process owns the clicked
-window: any ClipDrop-owned window counts as inside. Fixed permanently
+window: any Stacka-owned window counts as inside. Fixed permanently
 for all current and future windows.
 
 **Rows rendering white after the card restyle.** Scoping the window's
@@ -634,7 +635,7 @@ reset to default.
 
 | Action | Default |
 |---|---|
-| Open ClipDrop popup | `Ctrl+Shift+V` |
+| Open Stacka popup | `Ctrl+Shift+V` |
 | Pause / resume clipboard capture | `Ctrl+Shift+P` |
 | New snippet (blank scratchpad) | `Ctrl+Shift+N` |
 | Clear all history (with confirmation) | `Ctrl+Shift+H` |
@@ -659,7 +660,7 @@ row pastes the **whole selection as one payload**: text items joined
 line-by-line, files merged into a single multi-file paste. Selection
 survives live list refreshes and resets when the popup closes.
 
-#### Drag & drop out of ClipDrop
+#### Drag & drop out of Stacka
 
 Drag any main-list row into another app: files and images travel as
 real file URLs (drop on Explorer to copy them), text drops into
@@ -668,7 +669,7 @@ selection — the drag image shows a count bubble. Auto-close timers
 stand down while a drag is in flight, so the source window can never
 be destroyed mid-drag.
 
-#### Smarter "Paste from ClipDrop" button
+#### Smarter "Paste from Stacka" button
 
 The floating right-click button was rewritten around a simple rule:
 **anchor at the cursor, hug the context menu's border**. When the
@@ -711,17 +712,17 @@ history entry.
 
 **Status:** ✅ Complete
 
-This update reworks *how ClipDrop is summoned* on a right-click, and it
+This update reworks *how Stacka is summoned* on a right-click, and it
 was the result of chasing a problem that turned out to be unwinnable in
 its original framing.
 
 #### The problem
 
-ClipDrop needs to offer "Paste from ClipDrop" wherever you right-click.
+Stacka needs to offer "Paste from Stacka" wherever you right-click.
 On the Windows Shell (Desktop, File Explorer) it injects a real entry
 into the native menu through the registry — clean and native. But every
 other app builds its **own** right-click menu and allows no external
-injection. For those, ClipDrop floated a small "📋 Paste from ClipDrop"
+injection. For those, Stacka floated a small "📋 Paste from Stacka"
 button near the cursor.
 
 That button kept **overlapping the app's own context menu**. The fix
@@ -757,7 +758,7 @@ reliably avoid it.**
 
 The insight was to change the question. The overlap only exists because
 the trigger *is* the right-click — the same gesture that opens the menu
-we're trying to dodge. Trigger ClipDrop with a **different** gesture and
+we're trying to dodge. Trigger Stacka with a **different** gesture and
 there is no button to overlap, in any app, ever — no detection required.
 
 So the overlay button became one option among several **trigger modes**
@@ -785,7 +786,7 @@ with no flash at all.
 - **Middle-click / side button** override that button's normal use
   (open-in-new-tab, Back/Forward) while the mode is active — the cost of
   a dedicated one-hand trigger.
-- **Admin/UIPI:** a normal-privilege ClipDrop can't overlay or trigger
+- **Admin/UIPI:** a normal-privilege Stacka can't overlay or trigger
   over apps running as Administrator. See *Known Limitations*.
 - **Instant hide:** when the overlay button mode is used, a WinEvent hook
   now hides the button the moment its native menu closes (submenu-safe
@@ -848,7 +849,7 @@ Settings → **Icon pack** now offers two complete sets:
 
 | Pack | Style | Granularity |
 |---|---|---|
-| **Default ClipDrop** | Colourful modern icons — Office letter tiles, Python logo, gears, globe | per file category |
+| **Default Stacka** | Colourful modern icons — Office letter tiles, Python logo, gears, globe | per file category |
 | **Labeled documents** | Document page + glyph + extension badge (PDF, DOCX, PNG…) | per file **extension** |
 
 The Labeled pack renders a distinct icon for every extension — PNG, JPG,
@@ -925,7 +926,7 @@ folder**, in both the main list and the file side panels.
 | Single file | Launches it with its default app |
 | Folder | Opens it in Explorer |
 | Multi-file entry | *Reveal only* — never opens dozens of files at once |
-| Image | Opens the PNG ClipDrop saved for it |
+| Image | Opens the PNG Stacka saved for it |
 | URL | Opens it in the default browser |
 | Text / code / hex | No Open entries — there is nothing to open |
 
@@ -967,7 +968,7 @@ folder* never triggers it.
 
 Destroying a running `QThread` aborts the process — and a dead network
 path can legitimately keep a worker busy for the whole timeout. Quitting
-ClipDrop shortly after opening a stale network file would therefore have
+Stacka shortly after opening a stale network file would therefore have
 crashed on exit, so in-flight checks are given a moment to finish during
 shutdown.
 
@@ -1062,7 +1063,7 @@ the row stays gone when the folder is reopened.
 - **Right-click no longer selects a row.** Right-clicking a file in a side list
   used to highlight the row and show "1 selected", exactly like a `Ctrl+click`.
   The menu now opens without ever changing the selection.
-- **Overlay button steps aside.** The "Paste from ClipDrop" overlay no longer
+- **Overlay button steps aside.** The "Paste from Stacka" overlay no longer
   appears while the app popup is already open, so it can't interfere with it.
 
 ---
@@ -1105,7 +1106,7 @@ queue.
 
 #### The overlay button positions itself from the cursor
 
-The floating "Paste from ClipDrop" button no longer tries to *detect* the app's
+The floating "Paste from Stacka" button no longer tries to *detect* the app's
 context menu at all — the whole three-tier detection (the native `#32768` scan,
 the Chromium window heuristic, and the UI-Automation path, which needed the
 `comtypes` dependency) is gone, along with the "first right-click in a fresh app
@@ -1149,7 +1150,7 @@ overlay so it never sits behind it.
 **Status:** ✅ Complete (whole-clipboard only — detecting a card embedded
 inside a larger paste is a planned follow-up)
 
-Credit and debit card numbers are highly structured, so ClipDrop identifies
+Credit and debit card numbers are highly structured, so Stacka identifies
 them **entirely locally** — no AI, no network call — using three checks that
 must ALL agree:
 
@@ -1167,7 +1168,7 @@ mistaken for a card.
 
 #### Handled like the sensitive data it is
 
-Once ClipDrop recognises a card, it treats it differently from ordinary text:
+Once Stacka recognises a card, it treats it differently from ordinary text:
 
 - **Masked everywhere it's shown** — the list displays `Visa •••• 4242`, never
   the real digits, with its own green card icon.

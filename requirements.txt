@@ -1,7 +1,7 @@
 # ============================================================
-# ClipDrop - requirements.txt
+# Stacka - requirements.txt
 # ============================================================
-# All external Python libraries ClipDrop needs to run.
+# All external Python libraries Stacka needs to run.
 #
 # Install everything at once:
 #   pip install -r requirements.txt

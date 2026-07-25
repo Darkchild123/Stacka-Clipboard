@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - main.py
+# Stacka - main.py
 # ============================================================
 # App entry point. Starts all components in the correct order.
 #
@@ -37,11 +37,11 @@ _set_dpi_awareness()
 
 
 def _set_app_user_model_id():
-    # Windows: give the process its own taskbar identity so it shows ClipDrop's
+    # Windows: give the process its own taskbar identity so it shows Stacka's
     # icon (not the Python launcher's) and pins / groups as its own app.
     import ctypes
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cosmas.ClipDrop")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Cosmas.Stacka")
     except Exception:
         pass
 _set_app_user_model_id()
@@ -81,7 +81,7 @@ def protected_thread(name, target, *args, **kwargs):
 
 
 def main():
-    print("ClipDrop is starting...")
+    print("Stacka is starting...")
 
     # Step 1: QApplication — must exist before any QWidget is created
     app = QApplication(sys.argv)
@@ -92,7 +92,7 @@ def main():
     # fall back to the PNG.
     _assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "assets")
-    for _name in ("clipdrop.ico", "icon.png"):
+    for _name in ("stacka.ico", "icon.png"):
         _p = os.path.join(_assets, _name)
         if os.path.exists(_p):
             app.setWindowIcon(QIcon(_p))
@@ -113,7 +113,7 @@ def main():
                           profile_manager=profiles)
     # Expose app-wide so the settings panel can live-apply theme /
     # transparency changes to an open popup.
-    app.setProperty("clipdrop_popup", popup)
+    app.setProperty("stacka_popup", popup)
 
     # Step 6: Context Menu — setup() starts its own internal daemon threads
     # for mouse hook and signal file watcher; the call itself returns quickly.
@@ -121,7 +121,7 @@ def main():
     context = ContextMenu(history, popup)
     context.setup()
     # Expose app-wide so the Shortcuts window can re-bind the hotkey live
-    app.setProperty("clipdrop_context", context)
+    app.setProperty("stacka_context", context)
 
     # Step 7: Tray Icon — start() schedules tray creation via QTimer;
     # must be called on the main thread.
@@ -129,22 +129,22 @@ def main():
     tray.start()
     # Expose the tray app-wide so DropdownPopup._show_toast can post
     # balloon notifications without a circular import.
-    app.setProperty("clipdrop_tray", tray)
+    app.setProperty("stacka_tray", tray)
 
-    print("ClipDrop is running.")
-    print("  Right-click anywhere → 'Paste from ClipDrop'")
+    print("Stacka is running.")
+    print("  Right-click anywhere → 'Paste from Stacka'")
     print("  Or press Ctrl+Shift+V from any app")
 
     try:
         sys.exit(app.exec())
     except KeyboardInterrupt:
-        print("ClipDrop interrupted.")
+        print("Stacka interrupted.")
     finally:
         try:
             context.teardown()
         except Exception:
             pass
-        print("ClipDrop closed.")
+        print("Stacka closed.")
 
 
 if __name__ == "__main__":

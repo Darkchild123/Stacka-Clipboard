@@ -1,12 +1,12 @@
 # ============================================================
-# ClipDrop - context_menu.py  (PyQt6 rewrite)
+# Stacka - context_menu.py  (PyQt6 rewrite)
 # ============================================================
-# Handles all right-click integration for ClipDrop.
+# Handles all right-click integration for Stacka.
 #
 # A low-level Windows mouse hook detects every right-click
 # system-wide. When detected, a small floating button
-# "📋 Paste from ClipDrop" appears near the cursor.
-# Clicking it opens the ClipDrop popup.
+# "📋 Paste from Stacka" appears near the cursor.
+# Clicking it opens the Stacka popup.
 # The button disappears automatically after 3 seconds.
 #
 # Global hotkey Ctrl+Shift+V also triggers the popup.
@@ -65,7 +65,7 @@ _MOUSE_TRIGGERS = {"double_right", "button", "middle", "side", "ctrl_right"}
 # every entry at startup. Defaults use plain letters only — named keys
 # (Del, Tab…) spell differently between Qt and the keyboard library.
 SHORTCUT_DEFS = [
-    ("hotkey_open",    "Open ClipDrop popup window",       "ctrl+shift+v"),
+    ("hotkey_open",    "Open Stacka popup window",       "ctrl+shift+v"),
     ("hotkey_pause",   "Pause / resume clipboard capture", "ctrl+shift+p"),
     ("hotkey_snippet", "New snippet (blank scratchpad)",   "ctrl+shift+n"),
     ("hotkey_clear",   "Clear all history",                "ctrl+shift+h"),
@@ -73,9 +73,9 @@ SHORTCUT_DEFS = [
 ]
 
 REG_PATHS = [
-    r"*\shell\ClipDrop",
-    r"Directory\shell\ClipDrop",
-    r"Directory\Background\shell\ClipDrop",
+    r"*\shell\Stacka",
+    r"Directory\shell\Stacka",
+    r"Directory\Background\shell\Stacka",
 ]
 
 EXCLUDED_PROCESSES = {"explorer.exe"}
@@ -165,13 +165,13 @@ class _OverlaySignals(QObject):
                                      # library's thread; this marshals them
                                      # onto the Qt main thread.
     open_popup_at = pyqtSignal(int, int, bool)   # mouse trigger → open the
-                                           # ClipDrop popup at (x, y). bool =
+                                           # Stacka popup at (x, y). bool =
                                            # dismiss a native menu first (only
                                            # double-right-click flashes one).
 
 
 class OverlayButton(QWidget):
-    """The floating '📋 Paste from ClipDrop' button."""
+    """The floating '📋 Paste from Stacka' button."""
 
     def __init__(self, on_clicked):
         super().__init__(None,
@@ -184,7 +184,7 @@ class OverlayButton(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(1,1,1,1)
 
-        self._lbl = QLabel("📋  Paste from ClipDrop", self)
+        self._lbl = QLabel("📋  Paste from Stacka", self)
         self._lbl.setStyleSheet(
             f"background:{OVERLAY_BG};color:white;"
             "font-family:'Segoe UI';font-size:10pt;font-weight:bold;"
@@ -418,7 +418,7 @@ class ContextMenu:
         self._signals.show_overlay.emit()
 
     def _should_show_overlay(self):
-        # Never offer the "Paste from ClipDrop" overlay while ClipDrop's own
+        # Never offer the "Paste from Stacka" overlay while Stacka's own
         # popup is already open — it would float over the app window and
         # interfere with it. (_popup is a live QWidget while shown, None once
         # hidden — a cheap, thread-safe attribute read from the hook thread.)
@@ -504,7 +504,7 @@ class ContextMenu:
                 if (now - self._last_rdown <= self._dbl_ms
                         and abs(x - self._last_rpos[0]) <= 8
                         and abs(y - self._last_rpos[1]) <= 8):
-                    # Second quick click → open ClipDrop; swallow it so the
+                    # Second quick click → open Stacka; swallow it so the
                     # app's menu doesn't re-toggle under our popup.
                     self._last_rdown = 0.0
                     self._swallow_ups.add(WM_RBUTTONUP)
@@ -541,7 +541,7 @@ class ContextMenu:
             if wParam == WM_RBUTTONDOWN and (
                     user32.GetAsyncKeyState(VK_CONTROL) & 0x8000):
                 # Ctrl+right-click → suppress the native menu entirely
-                # (swallow both down and up) and open ClipDrop. No flash.
+                # (swallow both down and up) and open Stacka. No flash.
                 x, y = pt(); capture_target()
                 self._swallow_ups.add(WM_RBUTTONUP)
                 self._signals.open_popup_at.emit(x, y, False)
@@ -563,17 +563,17 @@ class ContextMenu:
             # HiDPI screens. WindowFromPoint works in physical pixels — the
             # same space as the hook — so it's always accurate regardless of DPI.
             #
-            # ClipDrop UI spans MANY top-level windows: the main popup, the
+            # Stacka UI spans MANY top-level windows: the main popup, the
             # file side panel, right-click QMenus ("Send to profile…"), the
             # profile-switcher QMenu… Enumerating them individually kept
             # missing one (side panel, then menus — each a "popup closes
             # unexpectedly" bug). The robust test: if the clicked window
-            # belongs to THIS PROCESS, it is ClipDrop UI — never hide.
+            # belongs to THIS PROCESS, it is Stacka UI — never hide.
             clicked_hwnd = win32gui.WindowFromPoint((click_x, click_y))
             if clicked_hwnd:
                 _tid, pid = win32process.GetWindowThreadProcessId(clicked_hwnd)
                 if pid == os.getpid():
-                    return  # Click is inside ClipDrop UI — do not hide
+                    return  # Click is inside Stacka UI — do not hide
             self.popup.hide()
         except Exception:
             pass
@@ -581,7 +581,7 @@ class ContextMenu:
     # ── Registry signal file watcher ──────────────────────────────────────────
 
     def _watch_signal_file(self):
-        signal_path = os.path.join(tempfile.gettempdir(), "clipdrop.signal")
+        signal_path = os.path.join(tempfile.gettempdir(), "stacka.signal")
         while self.running:
             try:
                 if os.path.exists(signal_path):
@@ -819,7 +819,7 @@ class ContextMenu:
             elif key == "hotkey_profile":
                 self._action_next_profile()
         except Exception as e:
-            print(f"[ClipDrop] Hotkey action '{key}' failed: {e}")
+            print(f"[Stacka] Hotkey action '{key}' failed: {e}")
 
     def _action_open(self):
         try:
@@ -882,13 +882,13 @@ class ContextMenu:
         if not os.path.exists(pythonw):
             pythonw = sys.executable
         command = (f'"{pythonw}" -c "import tempfile, pyautogui; '
-                   r"open(tempfile.gettempdir()+chr(92)+'clipdrop.signal','w').write(str(pyautogui.position()))" + '"')
+                   r"open(tempfile.gettempdir()+chr(92)+'stacka.signal','w').write(str(pyautogui.position()))" + '"')
         for reg_path in REG_PATHS:
             try:
                 key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                     r"Software\Classes\\" + reg_path, 0,
                     winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
-                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from ClipDrop")
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from Stacka")
                 winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
                 winreg.CloseKey(key)
                 cmd_key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,

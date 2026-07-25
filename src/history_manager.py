@@ -1,7 +1,7 @@
 # ============================================================
-# ClipDrop - history_manager.py
+# Stacka - history_manager.py
 # ============================================================
-# This is the brain of ClipDrop. It manages everything related
+# This is the brain of Stacka. It manages everything related
 # to clipboard history — saving, loading, pinning, deleting,
 # reordering, and enforcing the history size limit.
 # ============================================================
@@ -345,7 +345,7 @@ class HistoryManager:
     # ============================================================
 
     def _ensure_folders(self):
-        """Makes sure all the folders ClipDrop needs actually exist."""
+        """Makes sure all the folders Stacka needs actually exist."""
         os.makedirs(DATA_DIR,     exist_ok=True)
         os.makedirs(SETTINGS_DIR, exist_ok=True)
         os.makedirs(IMAGES_DIR,   exist_ok=True)

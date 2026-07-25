@@ -1,7 +1,7 @@
 # ============================================================
-# ClipDrop - dropdown_popup.py  (PyQt6 rewrite)
+# Stacka - dropdown_popup.py  (PyQt6 rewrite)
 # ============================================================
-# The main visual interface of ClipDrop.
+# The main visual interface of Stacka.
 # Shows a popup list at the cursor with all clipboard items.
 #
 # Framework: PyQt6
@@ -266,12 +266,12 @@ def _exec_menu_hover_close(menu, global_pos, is_alive=None, stale_ticks=8):
     """Run menu.exec() but AUTO-DISMISS the menu on hover-out.
 
     A QMenu normally stays up until an item is chosen or it's clicked away —
-    which, on ClipDrop's frameless no-activate windows, is unreliable and can
+    which, on Stacka's frameless no-activate windows, is unreliable and can
     leave the menu stuck. This closes it when the cursor leaves the menu
     (after a short grace so submenus stay reachable), when it was opened but
     never touched, or when is_alive() → False (the owning window went away, so
     the menu can't orphan on screen). The watchdog QTimer fires INSIDE exec()'s
-    nested loop. Returns the chosen QAction, or None. Used by every ClipDrop
+    nested loop. Returns the chosen QAction, or None. Used by every Stacka
     context menu — the main list and the side lists — so they all hover-close
     regardless of the main window's click/hover close-mode setting."""
     watch = QTimer(menu)
@@ -417,7 +417,7 @@ def _icon_pixmap(icon_type: str, size: int = 32, colour_hint: str = None,
         _ICON_CACHE[key] = pm
         return pm
     except Exception as e:
-        print(f"[ClipDrop] Icon draw failed for '{icon_type}' @ {size}px: {e}")
+        print(f"[Stacka] Icon draw failed for '{icon_type}' @ {size}px: {e}")
         from PIL import ImageDraw
         img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
@@ -2256,7 +2256,7 @@ class _PasteWorker(QThread):
 
         if self._watch:
             # Let the target app read the clipboard before the watcher
-            # resumes, so ClipDrop doesn't re-capture its own paste.
+            # resumes, so Stacka doesn't re-capture its own paste.
             time.sleep(0.5)
             try:
                 if item["type"] in ("text", "url", "code", "bash", "hex"):
@@ -2272,7 +2272,7 @@ class _PasteWorker(QThread):
 
 class DropdownPopup(QObject):
     """
-    The main ClipDrop popup window.
+    The main Stacka popup window.
 
     Interface (same as tkinter version so main.py needs minimal changes):
         show(x, y)   — show the popup at screen position (x, y)
@@ -2388,12 +2388,12 @@ class DropdownPopup(QObject):
         outer.setContentsMargins(18, 14, 18, 22)
         popup.set_grip_margins(18, 14, 18, 22)   # resize handles = this band
         card = QWidget(popup)
-        card.setObjectName("clipdrop_card")
+        card.setObjectName("stacka_card")
         # Explicit cursor so the card interior (and its children) never
         # inherit the window's resize cursor set while over the grip band.
         card.setCursor(Qt.CursorShape.ArrowCursor)
         card.setStyleSheet(
-            f"QWidget#clipdrop_card {{background:{C['bg']};"
+            f"QWidget#stacka_card {{background:{C['bg']};"
             f"border:1px solid {C['border']};border-radius:10px;}}")
         _shadow = QGraphicsDropShadowEffect(card)
         _shadow.setBlurRadius(15)     # 15 + offset 3 < margins (18/14/22)
@@ -2475,7 +2475,7 @@ class DropdownPopup(QObject):
         support.setStyleSheet(
             "color:#e11d6b;background:transparent;font-size:12px;font-weight:900;")
         support.setCursor(Qt.CursorShape.PointingHandCursor)
-        support.setToolTip("Support ClipDrop's development")
+        support.setToolTip("Support Stacka's development")
         support.mousePressEvent = lambda e: open_donation_page()
         fl.addWidget(credit)
         fl.addStretch()
@@ -2517,7 +2517,7 @@ class DropdownPopup(QObject):
         lay.setSpacing(6)
 
         # Title — also drag handle
-        title = QLabel("📋  ClipDrop", hdr)
+        title = QLabel("📋  Stacka", hdr)
         title.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         title.setStyleSheet("color:white;background:transparent;")
         lay.addWidget(title)
@@ -2982,7 +2982,7 @@ class DropdownPopup(QObject):
             try:
                 webbrowser.open(value)
             except Exception as e:
-                print(f"[ClipDrop] Could not open URL: {e}")
+                print(f"[Stacka] Could not open URL: {e}")
         elif action == "send":
             if item["id"] in self._selected_ids and len(self._selected_ids) > 1:
                 self._send_selected_to_profile(value, chosen.text())
@@ -3230,7 +3230,7 @@ class DropdownPopup(QObject):
                 return c[0], c[0]
             return None, c[0]      # multi-file: reveal only, never open N files
         if t == "image" and c:
-            return str(c), str(c)  # the PNG ClipDrop saved
+            return str(c), str(c)  # the PNG Stacka saved
         return None, None
 
     def open_path(self, path: str, reveal: bool = False):
@@ -3277,7 +3277,7 @@ class DropdownPopup(QObject):
         if reason == "missing":
             self._show_toast(f"⚠ No longer exists:  {os.path.basename(path)}")
         else:
-            print(f"[ClipDrop] Open failed for {path}: {reason}")
+            print(f"[Stacka] Open failed for {path}: {reason}")
             self._show_toast(f"⚠ Could not open  {os.path.basename(path)}")
 
     # ── Multi-selection + drag-out ───────────────────────────────────────────
@@ -3382,7 +3382,7 @@ class DropdownPopup(QObject):
         return [item]
 
     def _start_drag(self, item: dict, row):
-        """Drag rows OUT of ClipDrop — drop into any app to paste there.
+        """Drag rows OUT of Stacka — drop into any app to paste there.
         Runs synchronously from the row's mouse-move (Qt's DnD pattern);
         the popup stays open and never takes focus, so the drop target
         receives the data exactly like an Explorer drag."""
@@ -3618,7 +3618,7 @@ class DropdownPopup(QObject):
         return prev[:40] + "…" if len(prev) > 40 else prev
 
     def _on_paste_failed(self, msg: str):
-        print(f"[ClipDrop] Paste error: {msg}")
+        print(f"[Stacka] Paste error: {msg}")
         self._show_toast("Paste failed")
 
     def _on_paste_finished(self):

@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - snippet_window.py
+# Stacka - snippet_window.py
 # ============================================================
 # Blank scratchpad opened by the "New snippet" hotkey.
 # Type a note or code snippet, hit Save (or Ctrl+S) and it lands

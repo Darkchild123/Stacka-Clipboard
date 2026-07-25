@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - tray_icon.py  (PyQt6 rewrite)
+# Stacka - tray_icon.py  (PyQt6 rewrite)
 # ============================================================
 # System tray icon using QSystemTrayIcon.
 # Gives the user quick access to settings and controls
@@ -51,14 +51,14 @@ class TrayIcon:
     def _create_tray(self):
         # Prefer the multi-size .ico (crisp at the small tray sizes); fall back
         # to the PIL-loaded icon.png / generated placeholder.
-        ico = os.path.join(BASE_DIR, "assets", "clipdrop.ico")
+        ico = os.path.join(BASE_DIR, "assets", "stacka.ico")
         if os.path.exists(ico):
             icon = QIcon(ico)
         else:
             icon = QIcon(_pil_to_qpixmap(self._icon_img))
 
         self._tray = QSystemTrayIcon(icon)
-        self._tray.setToolTip("ClipDrop")
+        self._tray.setToolTip("Stacka")
         self._tray.activated.connect(self._on_tray_activated)
 
         menu = QMenu()
@@ -69,7 +69,7 @@ class TrayIcon:
         """)
 
         # Header (disabled label)
-        header = menu.addAction("ClipDrop")
+        header = menu.addAction("Stacka")
         header.setEnabled(False)
         menu.addSeparator()
 
@@ -85,7 +85,7 @@ class TrayIcon:
         clear_act.triggered.connect(self._clear_history)
         menu.addSeparator()
 
-        quit_act = menu.addAction("✖  Quit ClipDrop")
+        quit_act = menu.addAction("✖  Quit Stacka")
         quit_act.triggered.connect(self._quit)
 
         # Refresh profile label each time menu opens
@@ -128,14 +128,14 @@ class TrayIcon:
         print("History cleared from tray menu.")
         if self._tray:
             self._tray.showMessage(
-                "ClipDrop",
+                "Stacka",
                 "Clipboard history has been cleared.",
                 QSystemTrayIcon.MessageIcon.Information,
                 2000
             )
 
     def _quit(self):
-        print("Quitting ClipDrop...")
+        print("Quitting Stacka...")
         # Dismiss any open context menu + the popup/side panels FIRST, so
         # nothing is left orphaned on screen after the event loop stops.
         try:
@@ -146,7 +146,7 @@ class TrayIcon:
                 if nxt is pw:
                     break            # not going away — avoid a spin
                 pw = nxt
-            popup = QApplication.instance().property("clipdrop_popup")
+            popup = QApplication.instance().property("stacka_popup")
             if popup is not None:
                 popup._do_hide()
         except Exception:

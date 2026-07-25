@@ -1,5 +1,5 @@
 # ============================================================
-# ClipDrop - icon_packs.py
+# Stacka - icon_packs.py
 # ============================================================
 # Optional "Labeled" icon pack — a document-style set (white page +
 # folded corner + glyph + extension badge), keyed PER FILE EXTENSION.
