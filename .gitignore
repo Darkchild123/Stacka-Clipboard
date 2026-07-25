@@ -42,3 +42,7 @@ settings/
 
 # Auto-generated runtime files (created by the app, not for version control)
 src/trigger_popup.py
+
+# PyInstaller build spec — regenerated (and overwritten) by every
+# --noconfirm build, so tracking it only produces phantom diffs.
+*.spec
