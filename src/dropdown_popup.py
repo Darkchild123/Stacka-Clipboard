@@ -2292,52 +2292,101 @@ class _PasteWorker(QThread):
 
         if self._watch:
             self._watch.paused = True
+
+        # ── 1. Build the payload BEFORE touching the clipboard ───────────────
+        # Windows expects the clipboard to be held open only briefly. Doing the
+        # slow work inside that window — importing card_detect and running a
+        # DPAPI decrypt, or decoding an image and re-encoding it as BMP — could
+        # leave the clipboard handle invalid by the time SetClipboardData ran
+        # ("The handle is invalid", pasting a card). Worse, EmptyClipboard had
+        # already fired, so a failure ALSO wiped whatever the user had copied.
+        # Everything expensive now happens up front, and a failure here leaves
+        # the real clipboard untouched.
+        # CF_UNICODETEXT payloads are handed to pywin32 as READY-MADE UTF-16
+        # bytes with an explicit double-null terminator, never as a Python
+        # str. With a str, pywin32 builds the UTF-16 buffer itself, and that
+        # marshaling path produced native heap-corruption crashes (a card
+        # paste killed the whole app with no traceback — 0xc0000374 /
+        # "handle is invalid"). With bytes it copies verbatim: we control the
+        # buffer and the terminator, and the crash is gone.
+        def _as_cf_unicode(text: str) -> bytes:
+            return text.encode("utf-16-le") + b"\x00\x00"
+
+        fmt = payload = seen = None
         try:
-            win32clipboard.OpenClipboard()
-            win32clipboard.EmptyClipboard()
             if item["type"] in ("text", "url", "code", "bash", "hex"):
-                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, item["content"])
-                if self._watch:
-                    self._watch.last_seen = hashlib.md5(
-                        item["content"].encode("utf-8", errors="ignore")).hexdigest()
+                fmt, payload = win32con.CF_UNICODETEXT, _as_cf_unicode(item["content"])
+                seen = hashlib.md5(
+                    item["content"].encode("utf-8", errors="ignore")).hexdigest()
+
             elif item["type"] == "card":
-                # Decrypt the real number ONLY here, in memory, to paste it.
+                # The real number is decrypted ONLY here, in memory, to paste.
                 import card_detect
                 number = card_detect.decrypt(item["content"])
                 if not number:
                     raise ValueError("Could not decrypt the saved card number")
-                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, number)
-                if self._watch:
-                    self._watch.last_seen = hashlib.md5(
-                        number.encode("utf-8", errors="ignore")).hexdigest()
+                fmt, payload = win32con.CF_UNICODETEXT, _as_cf_unicode(number)
+                seen = hashlib.md5(number.encode("utf-8", errors="ignore")).hexdigest()
+
             elif item["type"] == "file":
                 files = item["content"]
-                if isinstance(files, list):
-                    file_block = b""
-                    for f in files:
-                        file_block += f.encode("utf-16-le") + b"\x00\x00"
-                    file_block += b"\x00\x00"
-                    header = struct.pack("<5I", 20, 0, 0, 0, 1)
-                    win32clipboard.SetClipboardData(win32con.CF_HDROP, header + file_block)
-                    if self._watch:
-                        self._watch.last_seen = hashlib.md5(
-                            str(files).encode("utf-8", errors="ignore")).hexdigest()
+                if not isinstance(files, list) or not files:
+                    raise ValueError("This item has no files to paste")
+                block = b""
+                for f in files:
+                    block += f.encode("utf-16-le") + b"\x00\x00"
+                block += b"\x00\x00"
+                fmt = win32con.CF_HDROP
+                payload = struct.pack("<5I", 20, 0, 0, 0, 1) + block
+                seen = hashlib.md5(str(files).encode("utf-8", errors="ignore")).hexdigest()
+
             elif item["type"] == "image":
                 img = Image.open(item["content"])
-                output = io.BytesIO()
-                img.convert("RGB").save(output, "BMP")
-                data = output.getvalue()[14:]
-                output.close()
-                win32clipboard.SetClipboardData(win32con.CF_DIB, data)
-            win32clipboard.CloseClipboard()
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, "BMP")
+                payload = buf.getvalue()[14:]   # strip the BMP file header
+                buf.close()
+                fmt = win32con.CF_DIB
+
+            else:
+                raise ValueError(f"Don't know how to paste a '{item['type']}' item")
         except Exception as e:
-            try:
-                win32clipboard.CloseClipboard()
-            except Exception:
-                pass
+            # Nothing was opened or emptied — the user's clipboard is intact.
             if self._watch:
-                # The clipboard may have been partly written before the error;
-                # mark it so a half-written state isn't captured as a new copy.
+                self._watch.paused = False
+            self.failed.emit(str(e))
+            return
+
+        # ── 2. Hold the clipboard for as short a time as possible ────────────
+        # Another app can legitimately own it for a moment, so retry briefly
+        # rather than failing the paste outright.
+        opened = False
+        try:
+            for attempt in range(5):
+                try:
+                    win32clipboard.OpenClipboard()
+                    opened = True
+                    break
+                except Exception:
+                    time.sleep(0.05)
+            if not opened:
+                raise RuntimeError("Clipboard is in use by another application")
+
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardData(fmt, payload)
+            win32clipboard.CloseClipboard()
+            opened = False
+            if self._watch and seen:
+                self._watch.last_seen = seen
+        except Exception as e:
+            if opened:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+            if self._watch:
+                # The clipboard may have been emptied before the error; mark it
+                # so that state isn't captured as a new copy.
                 try:
                     self._watch.mark_current_clipboard()
                 except Exception:

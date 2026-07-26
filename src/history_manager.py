@@ -156,6 +156,36 @@ class HistoryManager:
         return pinned + unpinned
 
 
+    def find_card_id(self, number: str):
+        """The id of an existing entry holding this exact card number, or None.
+
+        Every other item type is keyed by a hash of its content, so copying the
+        same thing twice lands on the same id and add_item just moves it back to
+        the top. A card is keyed by a RANDOM id instead — a hash of a card
+        number would be brute-forceable from the small space of valid numbers —
+        so that dedup could never see a repeat, and the same card piled up on
+        the list once per copy.
+
+        Candidates are narrowed by the cleartext last four digits (already
+        stored, already shown in the UI), then confirmed by decrypting only
+        those — normally none or one. That makes the match exact without
+        storing anything derived from the full number.
+        """
+        if not number:
+            return None
+        import card_detect
+        last4 = number[-4:]
+        for it in self.items:
+            if it.get("type") != "card" or it.get("last4") != last4:
+                continue
+            try:
+                if card_detect.decrypt(it.get("content", "")) == number:
+                    return it["id"]
+            except Exception:
+                continue      # unreadable entry — treat as "not a match"
+        return None
+
+
     def get_preview(self, item):
         """
         Returns a short preview string for an item to show in the dropdown.
