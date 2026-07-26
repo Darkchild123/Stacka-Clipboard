@@ -908,7 +908,16 @@ class ContextMenu:
         # Menu icon: the frozen exe carries the embedded Stacka icon; in dev
         # point straight at the .ico so the Stacka icon shows there too
         # (instead of python.exe's icon).
-        from app_paths import is_frozen, resource_path
+        from app_paths import is_frozen, is_packaged, resource_path
+
+        # In an MSIX build these writes are VIRTUALIZED into the package's own
+        # hive, so Explorer never sees them — the entry cannot appear no matter
+        # what we write. Skip the work rather than repeating it every launch.
+        if is_packaged():
+            print("Packaged build — skipping the Explorer shell entry "
+                  "(registry is virtualized; use a trigger from Settings).")
+            return
+
         icon_value = (sys.executable + ",0") if is_frozen() \
             else resource_path("assets", "stacka.ico")
 
