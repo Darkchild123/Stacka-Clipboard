@@ -261,21 +261,42 @@ class ProfileManager:
         self._save()
 
 
-    def clear_profile(self, profile_id):
+    def clear_profile(self, profile_id, keep_pinned: bool = False):
         """
         Removes all items from a named profile (and their copied images).
         General cannot be cleared this way — use history.clear_all() instead.
+
+        keep_pinned=True spares items pinned IN THIS PROFILE (auto-wipe).
         """
         if profile_id == GENERAL_ID:
             return
         profile = self._find(profile_id)
-        if profile:
-            for it in profile.get("items", []):
+        if not profile:
+            return
+        pinned_ids = set(profile.get("pinned_item_ids", [])) if keep_pinned else set()
+        kept = []
+        for it in profile.get("items", []):
+            if it["id"] in pinned_ids:
+                kept.append(it)
+            else:
                 self._delete_item_image(it, profile_id)
-            profile["items"] = []
-            profile["pinned_item_ids"] = []
-            self._save()
-            print(f"Profile cleared: {profile_id}")
+        profile["items"] = kept
+        profile["pinned_item_ids"] = [i for i in profile.get("pinned_item_ids", [])
+                                      if any(k["id"] == i for k in kept)]
+        self._save()
+        print(f"Profile cleared: {profile_id} ({len(kept)} pinned kept)")
+
+
+    def clear_all_profiles(self, keep_pinned: bool = False):
+        """Clear every NAMED profile. General is the live history and is
+        cleared through HistoryManager.clear_all() by the caller."""
+        n = 0
+        for p in list(self.profiles):
+            if p["id"] == GENERAL_ID or p.get("built_in"):
+                continue
+            self.clear_profile(p["id"], keep_pinned=keep_pinned)
+            n += 1
+        return n
 
 
     def remove_item_from_all(self, item_id):

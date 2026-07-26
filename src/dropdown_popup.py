@@ -684,7 +684,11 @@ def _content_count(item: dict):
         return len(content)
     if os.path.isdir(content[0]):
         try:
-            return len(os.listdir(content[0]))
+            # Must exclude paths the user hid via "Remove from list", or the
+            # badge keeps showing the original count after a removal.
+            hidden = item.get("hidden_files") or []
+            kids = [os.path.join(content[0], n) for n in os.listdir(content[0])]
+            return len([k for k in kids if k not in hidden]) if hidden else len(kids)
         except OSError:
             return None
     return None
@@ -1098,8 +1102,23 @@ class ItemRowWidget(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self._leave_hover()
+        # While this row's side panel is open the row stays lit, so it is
+        # visible WHICH row the panel belongs to. Moving the mouse from the
+        # row into the panel fires this leaveEvent, so without the hold the
+        # parent row would go dark the moment you reached its own flyout.
+        if not getattr(self, "_hover_hold", False):
+            self._leave_hover()
         super().leaveEvent(event)
+
+    def set_hover_hold(self, on: bool):
+        """Keep this row highlighted regardless of the mouse (used while its
+        side panel is open). Releasing drops the highlight unless the cursor
+        is genuinely back over the row."""
+        self._hover_hold = bool(on)
+        if on:
+            self._enter_hover()
+        elif not self.underMouse():
+            self._leave_hover()
 
     # ── Mouse events (click / drag) ─────────────────────────────────────────
 
@@ -1603,6 +1622,15 @@ class SidePanelWidget(QWidget):
         super().leaveEvent(e)
 
     def closeEvent(self, e):
+        # The parent row is highlighted for as long as ITS panel lives, so
+        # release that highlight here. Only the top-level panel owns the row —
+        # a nested folder panel closing must not unlight it.
+        ctrl = getattr(self, "controller", None)
+        if ctrl is not None and getattr(ctrl, "_side_panel", None) is self:
+            try:
+                ctrl._release_panel_row()
+            except RuntimeError:
+                pass
         # A context menu open on this panel must die WITH the panel — else it
         # orphans on screen after the panel (or the whole app) closes. The
         # watchdog also handles this, but closing here is immediate and covers
@@ -1626,6 +1654,8 @@ class SidePanelWidget(QWidget):
         if self._parent_panel is not None:
             try:
                 self._parent_panel.arm_close_timer()
+                # This panel's owning row in the parent list goes dark with it.
+                self._parent_panel._release_hold_row()
             except RuntimeError:
                 pass
         super().closeEvent(e)
@@ -1644,9 +1674,32 @@ class SidePanelWidget(QWidget):
             # Hovered a non-folder row — let the open child wind down
             self._sub_panel.arm_close_timer()
 
+    def _hold_row(self, qi: QListWidgetItem):
+        """Keep a side-list row highlighted while ITS folder panel is open, so
+        the trail from main row → side list → folder list stays visible. The
+        list's :hover styling only lights the row the cursor is physically on,
+        which goes dark the moment you reach the child panel."""
+        self._release_hold_row()
+        if qi is not None:
+            try:
+                qi.setBackground(QBrush(QColor(self.C["bg_hover"])))
+                self._hold_item = qi
+            except RuntimeError:
+                self._hold_item = None
+
+    def _release_hold_row(self):
+        qi = getattr(self, "_hold_item", None)
+        if qi is not None:
+            try:
+                qi.setBackground(QBrush(Qt.GlobalColor.transparent))
+            except RuntimeError:
+                pass          # row already removed from the list
+            self._hold_item = None
+
     def _open_sub_panel(self, qi: QListWidgetItem, folder: str):
         if self._sub_panel and self._sub_panel._folder == folder:
             self._sub_panel.cancel_close_timer()   # already showing it
+            self._hold_row(qi)
             return
         if self._sub_panel:
             try:
@@ -1673,6 +1726,8 @@ class SidePanelWidget(QWidget):
                               controller=self.controller, parent_panel=self,
                               title=os.path.basename(folder))
         sub._folder = folder
+        # Light the row this folder panel belongs to, for the visual trail.
+        self._hold_row(qi)
         self._sub_panel = sub
 
         # Same smart side-picking as the main popup's panel, relative to us
@@ -1992,6 +2047,10 @@ class SidePanelWidget(QWidget):
         if changed and self.controller is not None:
             self.controller.history._save_history()
         self._hdr.setText(self._hdr_text())
+        # Repaint the main list too — the parent row's file-count badge is
+        # computed from the entry, so without this it keeps the old number.
+        if self.controller is not None:
+            self.controller._refresh()
         if not self.files:
             self.close()   # everything in this folder view is hidden now
 
@@ -2234,6 +2293,12 @@ class _PasteWorker(QThread):
             except Exception:
                 pass
             if self._watch:
+                # The clipboard may have been partly written before the error;
+                # mark it so a half-written state isn't captured as a new copy.
+                try:
+                    self._watch.mark_current_clipboard()
+                except Exception:
+                    pass
                 self._watch.paused = False
             self.failed.emit(str(e))
             return
@@ -2266,6 +2331,11 @@ class _PasteWorker(QThread):
                 elif item["type"] == "file":
                     self._watch.last_seen = hashlib.md5(
                         str(item["content"]).encode("utf-8")).hexdigest()
+                # The watcher now decides "is this new?" from the clipboard
+                # SEQUENCE NUMBER, and the paste above bumped it. Record it
+                # here — BEFORE un-pausing — or the next poll captures our
+                # own paste as a fresh copy.
+                self._watch.mark_current_clipboard()
             except Exception:
                 pass
             self._watch.paused = False
@@ -2293,6 +2363,7 @@ class DropdownPopup(QObject):
 
         self._popup       = None   # The QWidget window
         self._side_panel  = None   # SidePanelWidget if open
+        self._panel_row   = None   # row whose side panel is open (stays lit)
         self._paste_target = None  # hwnd of window that was focused at right-click
         self._paste_worker = None  # _PasteWorker QThread while a paste runs
         self._open_workers = set() # live _OpenWorker threads (GC guard)
@@ -2727,7 +2798,20 @@ class DropdownPopup(QObject):
         hidden = hidden or []
         return [f for f in kids if f not in hidden] if hidden else kids
 
+    def _release_panel_row(self):
+        """Drop the highlight held by the row that owned the last side panel.
+        Without this every row that ever opened a panel stays lit."""
+        prev = getattr(self, "_panel_row", None)
+        if prev is not None:
+            try:
+                prev.set_hover_hold(False)
+            except RuntimeError:
+                pass          # row widget already destroyed by a refresh
+            self._panel_row = None
+
     def _open_side_panel(self, row: QWidget, item: dict, files: list):
+        # A new panel means the previous owner row is no longer the parent.
+        self._release_panel_row()
         if self._side_panel:
             try:
                 self._side_panel.cancel_close_timer()
@@ -2757,6 +2841,13 @@ class DropdownPopup(QObject):
                                 paste_single_file, self._popup,
                                 controller=self)
         self._side_panel = panel
+        # Light the parent row and keep it lit for as long as this panel (or
+        # any folder panel nested off it) is alive.
+        self._panel_row = row
+        try:
+            row.set_hover_hold(True)
+        except AttributeError:
+            pass
 
         # Smart positioning: open on whichever side of the popup has room.
         # Prefer the right (natural flyout direction); fall back to the

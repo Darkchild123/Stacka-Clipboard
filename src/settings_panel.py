@@ -18,6 +18,7 @@ from PyQt6.QtGui     import QFont, QIntValidator, QCursor, QKeySequence
 import math
 
 import i18n
+import auto_wipe
 from donate import DONATE_URL, open_donation_page
 
 APP_NAME    = "Stacka"
@@ -645,10 +646,33 @@ class SettingsPanel(QWidget):
             return
         self.history.save_setting("language", code)
         i18n.set_language(code)
+
+        # Everything that is built ONCE and then kept has to be relabelled by
+        # hand, or it stays stuck in the previous language until a restart.
+        app = QApplication.instance()
+
+        # The tray menu is created at startup and never rebuilt.
+        tray = app.property("stacka_tray") if app else None
+        if tray is not None:
+            try:
+                tray.retranslate()
+            except Exception as e:
+                print(f"[Stacka] Tray retranslate failed: {e}")
+
+        # The Shortcuts window, if the user has it open.
+        if self._shortcuts_win is not None:
+            try:
+                if self._shortcuts_win.isVisible():
+                    self._shortcuts_win.close()
+            except RuntimeError:
+                self._shortcuts_win = None
+
         # Re-render the whole panel in the new language (same path as a theme
         # change — deferred widget deletion, so this is safe from the signal).
         self._rebuild_ui()
         self._apply_titlebar_theme()
+        # And the popup itself (header, search placeholder, menus) if it's open.
+        self._apply_to_app(full=True)
 
     def _section_appearance(self) -> QWidget:
         C = self.C
@@ -1140,11 +1164,74 @@ class SettingsPanel(QWidget):
         bl.addStretch()
         lay.addWidget(btn_row)
 
+        # ── Auto-wipe ─────────────────────────────────────────────────────────
+        # Scheduled clear-out so old clips don't pile up forever. Pinned items
+        # are always kept — pinning means "never remove this automatically".
+        wipe_row = QWidget(w); wipe_row.setStyleSheet(f"background:{C['bg']};")
+        wl = QHBoxLayout(wipe_row); wl.setContentsMargins(0,0,0,0); wl.setSpacing(8)
+        wlbl = QLabel(i18n.tr("Auto-wipe:"), wipe_row)
+        wlbl.setStyleSheet(f"color:{C['text']};background:transparent;")
+        wl.addWidget(wlbl)
+
+        self._wipe_combo = QComboBox(wipe_row)
+        for key, label, _days in auto_wipe.SCHEDULES:
+            self._wipe_combo.addItem(i18n.tr(label), key)
+        cur = self.history.settings.get("auto_wipe", auto_wipe.OFF)
+        idx = self._wipe_combo.findData(cur)
+        if idx >= 0:
+            self._wipe_combo.setCurrentIndex(idx)   # before connect — no stray fire
+        self._wipe_combo.setFixedWidth(130)
+        self._wipe_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._wipe_combo.setStyleSheet(
+            f"QComboBox{{background:{C['bg_input']};color:{C['text']};border:1px solid "
+            f"{C['border']};border-radius:4px;padding:3px 8px;}}"
+            "QComboBox::drop-down{subcontrol-origin:padding;subcontrol-position:center right;"
+            "border:none;width:20px;}"
+            f"QComboBox::down-arrow{{width:0;height:0;margin-right:7px;"
+            "border-left:5px solid transparent;border-right:5px solid transparent;"
+            f"border-top:6px solid {C['text_dim']};}}"
+            f"QComboBox QAbstractItemView{{background:{C['bg_section']};color:{C['text']};"
+            f"selection-background-color:{C['accent']};selection-color:white;outline:none;}}")
+        self._wipe_combo.currentIndexChanged.connect(self._on_auto_wipe_changed)
+        wl.addWidget(self._wipe_combo)
+        wl.addStretch()
+        lay.addWidget(wipe_row)
+
+        self._wipe_hint = QLabel("", w)
+        self._wipe_hint.setWordWrap(True)
+        self._wipe_hint.setStyleSheet(
+            f"color:{C['text_dim']};font-size:8pt;background:transparent;")
+        lay.addWidget(self._wipe_hint)
+        self._refresh_wipe_hint()
+
         clear_btn = QPushButton("🧹  " + i18n.tr("Clear All History"), w)
         clear_btn.setStyleSheet(_btn_style(C["danger"], C["danger_hover"]))
         clear_btn.clicked.connect(self._confirm_clear)
         lay.addWidget(clear_btn)
         return w
+
+    def _refresh_wipe_hint(self):
+        """One line under the dropdown: what it will do and when."""
+        s = self.history.settings
+        key = s.get("auto_wipe", auto_wipe.OFF)
+        if key == auto_wipe.OFF:
+            self._wipe_hint.setText(
+                i18n.tr("History is kept until you clear it yourself."))
+            return
+        due = auto_wipe.next_due(s)
+        when = due.strftime("%d %b %Y") if due else "—"
+        self._wipe_hint.setText(
+            f"{i18n.tr('Clears every list automatically. Pinned items are kept.')} "
+            f"{i18n.tr('Next:')} {when}")
+
+    def _on_auto_wipe_changed(self, idx: int):
+        key = self._wipe_combo.itemData(idx)
+        if key is None or key == self.history.settings.get("auto_wipe", auto_wipe.OFF):
+            return
+        # start_schedule stamps "now", so a freshly chosen schedule counts from
+        # today instead of firing immediately.
+        auto_wipe.start_schedule(self.history, key)
+        self._refresh_wipe_hint()
 
     def _section_profiles(self) -> QWidget:
         C = self.C
@@ -1329,7 +1416,7 @@ class SettingsPanel(QWidget):
         try:
             value = int(self._limit_edit.text())
             if not (1 <= value <= 1000):
-                QMessageBox.warning(self, "Invalid Value",
+                self._tell("Invalid Value",
                     "History limit must be between 1 and 1000.")
                 return
             self.history.set_limit(value)
@@ -1339,16 +1426,67 @@ class SettingsPanel(QWidget):
             self._save_feedback.setText("✓  Saved!")
             QTimer.singleShot(2000, lambda: self._save_feedback.setText(""))
         except ValueError:
-            QMessageBox.warning(self, "Invalid Value",
+            self._tell("Invalid Value",
                 "Please enter a whole number.")
 
+    # ── Themed dialogs ────────────────────────────────────────────────────────
+    # QMessageBox does NOT inherit this window's stylesheet, so on the dark
+    # theme it rendered dark text on a dark button — the Yes/No buttons were
+    # all but invisible. Every confirmation goes through these helpers.
+
+    def _style_box(self, box: QMessageBox):
+        C = self.C
+        box.setStyleSheet(
+            f"QMessageBox {{background:{C['bg']};}}"
+            f"QMessageBox QLabel {{color:{C['text']};background:transparent;"
+            "font-family:'Segoe UI';font-size:10pt;}"
+            "QMessageBox QPushButton {"
+            f"background:{C['accent']};color:white;border:1px solid "
+            f"{_shade(C['accent'], -0.25)};border-radius:5px;"
+            "padding:6px 18px;min-width:76px;font-family:'Segoe UI';font-size:9pt;}"
+            f"QMessageBox QPushButton:hover {{background:{C['accent_hover']};}}"
+            f"QMessageBox QPushButton:pressed {{background:{_shade(C['accent'], -0.2)};}}")
+        return box
+
+    def _ask(self, title: str, text: str) -> bool:
+        """Yes/No confirmation. Defaults to No so Enter can't destroy data."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes |
+                               QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        self._style_box(box)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _tell(self, title: str, text: str):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        self._style_box(box)
+        box.exec()
+
     def _confirm_clear(self):
-        reply = QMessageBox.question(self, "Clear History",
-            "Clear all clipboard history?\n\nThis cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
+        n_prof = 0
+        if self.profiles:
+            n_prof = len([p for p in self.profiles.get_all_profiles()
+                          if p["id"] != "general"])
+        extra = (f"\n\nThis empties General and all {n_prof} profile(s), "
+                 "including pinned items." if n_prof else
+                 "\n\nThis empties everything, including pinned items.")
+        if self._ask(i18n.tr("Clear All History"),
+                     i18n.tr("Clear your entire clipboard history?") + extra +
+                     "\n\n" + i18n.tr("This cannot be undone.")):
             self.history.clear_all()
-            QMessageBox.information(self, "Done", "Clipboard history has been cleared.")
+            if self.profiles:
+                self.profiles.clear_all_profiles()
+                self._refresh_profile_list()
+            self._apply_to_app()
+            self._tell(i18n.tr("Done"),
+                       i18n.tr("Clipboard history has been cleared."))
 
     # ── Profile actions ───────────────────────────────────────────────────────
 
@@ -1373,7 +1511,7 @@ class SettingsPanel(QWidget):
     def _switch_profile(self):
         p = self._selected_profile()
         if not p:
-            QMessageBox.information(self, "Switch Profile",
+            self._tell("Switch Profile",
                 "Select a profile first."); return
         self.profiles.set_active(p["id"])
         self._refresh_profile_list()
@@ -1387,9 +1525,9 @@ class SettingsPanel(QWidget):
     def _rename_profile(self):
         p = self._selected_profile()
         if not p:
-            QMessageBox.information(self, "Rename", "Select a profile first."); return
+            self._tell("Rename", "Select a profile first."); return
         if p.get("built_in"):
-            QMessageBox.information(self, "Rename", "General cannot be renamed."); return
+            self._tell("Rename", "General cannot be renamed."); return
         name, ok = QInputDialog.getText(self, "Rename Profile",
             f"New name for '{p['name']}':", text=p["name"])
         if ok and name.strip():
@@ -1399,40 +1537,45 @@ class SettingsPanel(QWidget):
     def _delete_profile(self):
         p = self._selected_profile()
         if not p:
-            QMessageBox.information(self, "Delete", "Select a profile first."); return
+            self._tell("Delete", "Select a profile first."); return
         if p.get("built_in"):
-            QMessageBox.information(self, "Delete", "General cannot be deleted."); return
-        reply = QMessageBox.question(self, "Delete Profile",
-            f"Delete profile '{p['name']}'?\n\nItems stay in General.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
+            self._tell("Delete", "General cannot be deleted."); return
+        if self._ask("Delete Profile",
+                     f"Delete the profile '{p['name']}'?\n\n"
+                     "Its own copies of the clips are deleted with it. General "
+                     "and your other profiles are not affected.\n\n"
+                     "This cannot be undone."):
             self.profiles.delete_profile(p["id"])
             self._refresh_profile_list()
 
     def _clear_selected_profile(self):
         p = self._selected_profile()
         if not p:
-            QMessageBox.information(self, "Clear", "Select a profile first."); return
+            self._tell("Clear", "Select a profile first."); return
+        # Wording follows the EXPORT model: every list owns its items, so
+        # clearing one list never touches another. (The old text said things
+        # like "Others are permanently deleted" and "Items stay in General",
+        # which described the shared-pool design this app no longer uses —
+        # and was simply wrong for a profile's own copies.)
         if p["id"] == "general":
-            reply = QMessageBox.question(self, "Clear General",
-                "Clear all items from General?\n\nItems in named profiles stay there. "
-                "Others are permanently deleted.\n\nThis cannot be undone.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                # Export model: named profiles hold their own copies, so
-                # clearing General simply empties the live history.
+            if self._ask("Clear General",
+                         "Clear all items from General?\n\n"
+                         "Your profiles keep their own copies and are not "
+                         "affected.\n\nThis cannot be undone."):
                 self.history.clear_all()
                 self._refresh_profile_list()
-                QMessageBox.information(self, "Done",
-                    "General cleared.\nNamed profiles keep their own copies.")
+                self._apply_to_app()
+                self._tell("Done", "General has been cleared.")
         else:
-            reply = QMessageBox.question(self, "Clear Profile",
-                f"Clear all items from '{p['name']}'?\n\nItems stay in General.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
+            if self._ask("Clear Profile",
+                         f"Clear all items from '{p['name']}'?\n\n"
+                         "Only this profile's own copies are removed. General "
+                         "and your other profiles are not affected.\n\n"
+                         "This cannot be undone."):
                 self.profiles.clear_profile(p["id"])
                 self._refresh_profile_list()
-                QMessageBox.information(self, "Done", f"'{p['name']}' cleared.")
+                self._apply_to_app()
+                self._tell("Done", f"'{p['name']}' has been cleared.")
 
     def _move_profile_up(self):
         p = self._selected_profile()

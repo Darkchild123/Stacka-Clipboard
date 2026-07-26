@@ -183,6 +183,16 @@ def main():
     # balloon notifications without a circular import.
     app.setProperty("stacka_tray", tray)
 
+    # Step 8: Auto-wipe — run any schedule that fell due while the app was
+    # closed, then check hourly. Pinned items are always kept.
+    import auto_wipe
+    from PyQt6.QtCore import QTimer
+    auto_wipe.run_if_due(history, profiles)
+    _wipe_timer = QTimer()
+    _wipe_timer.timeout.connect(lambda: auto_wipe.run_if_due(history, profiles))
+    _wipe_timer.start(60 * 60 * 1000)          # hourly
+    app.setProperty("stacka_wipe_timer", _wipe_timer)   # keep a reference alive
+
     print("Stacka is running.")
     print("  Right-click anywhere → 'Paste from Stacka'")
     print("  Or press Ctrl+Shift+V from any app")

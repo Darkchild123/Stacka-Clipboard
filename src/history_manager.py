@@ -174,6 +174,11 @@ class HistoryManager:
             url = item["content"].strip()
             return url[:120] + "..." if len(url) > 120 else url
 
+        if item["type"] == "hex":
+            # The colour code IS the preview — "#4F46E5". Without this branch
+            # a hex clip fell through to the catch-all and read "Unknown item".
+            return str(item["content"]).strip()
+
         if item["type"] in ("code", "bash"):
             import re
             # Show the first non-empty line as the preview
@@ -202,6 +207,12 @@ class HistoryManager:
         elif item["type"] == "image":
             return "📷 Image"
 
+        # Catch-all for any type added later: show the content rather than a
+        # useless "Unknown item" label.
+        content = item.get("content")
+        if isinstance(content, str) and content.strip():
+            text = " ".join(content.split())
+            return text[:120] + "..." if len(text) > 120 else text
         return "Unknown item"
 
 
@@ -297,20 +308,32 @@ class HistoryManager:
     # CLEAR ALL
     # ============================================================
 
-    def clear_all(self):
+    def clear_all(self, keep_pinned: bool = False):
         """
-        Deletes all clipboard history.
-        Also cleans up any saved image files.
-        """
-        # Delete all saved image files
-        for item in self.items:
-            if item["type"] == "image" and os.path.exists(item["content"]):
-                os.remove(item["content"])
+        Deletes all clipboard history, and the image files that go with it.
 
-        # Clear the list
-        self.items = []
+        keep_pinned=True spares pinned items. Auto-wipe uses that, because a
+        pinned item is the user saying "never remove this automatically";
+        the manual Clear button passes False and removes everything.
+        """
+        kept     = [i for i in self.items if i.get("pinned")] if keep_pinned else []
+        kept_ids = {i["id"] for i in kept}
+
+        for item in self.items:
+            if item["id"] in kept_ids:
+                continue
+            # content is a PATH for images; guard the type — a malformed entry
+            # must not take the whole clear down.
+            if item.get("type") == "image" and isinstance(item.get("content"), str):
+                try:
+                    if os.path.exists(item["content"]):
+                        os.remove(item["content"])
+                except OSError:
+                    pass
+
+        self.items = kept
         self._save_history()
-        print("History cleared.")
+        print(f"History cleared ({len(kept)} pinned item(s) kept).")
 
 
     # ============================================================

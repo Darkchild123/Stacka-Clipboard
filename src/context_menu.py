@@ -78,8 +78,21 @@ REG_PATHS = [
     r"Directory\Background\shell\Stacka",
 ]
 
-EXCLUDED_PROCESSES = {"explorer.exe"}
-EXCLUDED_WINDOW_CLASSES = {"CabinetWClass", "ExplorerWClass", "WorkerW"}
+# File Explorer and the Desktop used to be excluded from the overlay button,
+# because the registry-injected "Paste from Stacka" entry already served them
+# natively and a floating button on top of it was just noise.
+#
+# The Microsoft Store build has no shell entry at all: a packaged app's
+# registry writes are virtualized and never reach Explorer (declaring a real
+# package context menu needs a native IExplorerCommand DLL — see
+# msix/STORE-NOTES.md). Excluding Explorer there would leave right-click with
+# no Stacka entry point whatsoever.
+#
+# So the overlay is now offered everywhere. It stays entirely opt-in — it only
+# appears if the user picked the "Overlay button" trigger in Settings — and in
+# the installer build, where the shell entry does exist, both simply work.
+EXCLUDED_PROCESSES = set()
+EXCLUDED_WINDOW_CLASSES = set()
 
 OVERLAY_BG    = "#4f46e5"
 OVERLAY_HOVER = "#6366f1"
