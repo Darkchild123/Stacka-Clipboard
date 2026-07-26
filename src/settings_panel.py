@@ -19,6 +19,7 @@ import math
 
 import i18n
 import auto_wipe
+import app_paths
 from donate import DONATE_URL, open_donation_page
 
 APP_NAME    = "Stacka"
@@ -980,6 +981,19 @@ class SettingsPanel(QWidget):
         hint.setStyleSheet(f"color:{C['text_dim']};font-size:8pt;"
                            f"background:transparent;")
         lay.addWidget(hint)
+
+        # Store build: Windows virtualizes a packaged app's registry, so the
+        # "Paste from Stacka" entry can't be added to Explorer's own menu.
+        # Say so here — otherwise it just looks like a missing feature.
+        if app_paths.is_packaged():
+            note = QLabel(i18n.tr(
+                "Note: the Windows Explorer right-click entry isn't available "
+                "in the Microsoft Store version. Use one of the triggers below "
+                "— they all work in Explorer too."), w)
+            note.setWordWrap(True)
+            note.setStyleSheet(f"color:{C['accent_hover']};font-size:8pt;"
+                               f"background:transparent;")
+            lay.addWidget(note)
         self._triggers = self._read_triggers()
         self._trigger_btns = {}
 

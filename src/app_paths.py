@@ -28,6 +28,39 @@ def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
+_packaged = None
+
+
+def is_packaged() -> bool:
+    """True when running inside an MSIX package (the Microsoft Store build).
+
+    A packaged app has its registry writes VIRTUALIZED — they land in the
+    package's private hive and never reach Explorer — so features that depend
+    on registering with the shell simply cannot work there. Knowing which
+    build we are lets the app skip those writes instead of performing them
+    pointlessly, and lets Settings say so rather than leaving the user to
+    wonder why an entry is missing.
+
+    Detected with GetCurrentPackageFullName: it returns APPMODEL_ERROR_NO_PACKAGE
+    (15700) when the process has no package identity.
+    """
+    global _packaged
+    if _packaged is not None:
+        return _packaged
+    _packaged = False
+    try:
+        import ctypes
+        APPMODEL_ERROR_NO_PACKAGE = 15700
+        length = ctypes.c_uint32(0)
+        rc = ctypes.windll.kernel32.GetCurrentPackageFullName(
+            ctypes.byref(length), None)
+        _packaged = (rc != APPMODEL_ERROR_NO_PACKAGE)
+    except Exception:
+        # Pre-Windows-8, or the call is unavailable — treat as unpackaged.
+        _packaged = False
+    return _packaged
+
+
 def resource_dir() -> str:
     """Base folder for read-only bundled resources."""
     if is_frozen():
