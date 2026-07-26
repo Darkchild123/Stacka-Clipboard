@@ -1905,12 +1905,39 @@ class SidePanelWidget(QWidget):
             qi.setData(_PIN_ROLE, fp in pinned)
             row_ext = None if itype == "folder" else ext
             if itype == "folder":
-                try:
-                    qi.setData(_COUNT_ROLE, len(os.listdir(fp)))
-                except OSError:
-                    pass   # unreadable folder — no count shown
+                cnt = self._folder_count(fp)
+                if cnt is not None:
+                    qi.setData(_COUNT_ROLE, cnt)
             qi.setIcon(QIcon(_icon_pixmap(itype, self._row_icon_px, ext=row_ext)))
             self._list.addItem(qi)
+
+    def _folder_count(self, fp: str):
+        """How many files a folder row represents, EXCLUDING any hidden with
+        "Remove from list". A raw os.listdir() here was why a folder still
+        read 4 after one of its four files was removed."""
+        try:
+            hidden = self.item.get("hidden_files") or []
+            kids = [os.path.join(fp, n) for n in os.listdir(fp)]
+            return len([k for k in kids if k not in hidden]) if hidden else len(kids)
+        except OSError:
+            return None      # unreadable folder — no count shown
+
+    def _refresh_counts(self):
+        """Recompute every folder row's count in place. Called on a panel when
+        one of ITS folders was changed from a child panel, so the number the
+        user is looking at matches what the child list now contains."""
+        try:
+            for i in range(self._list.count()):
+                qi = self._list.item(i)
+                fp = qi.data(Qt.ItemDataRole.UserRole)
+                if fp and os.path.isdir(fp):
+                    cnt = self._folder_count(fp)
+                    if cnt is not None:
+                        qi.setData(_COUNT_ROLE, cnt)
+            self._list.viewport().update()     # repaint the delegate numbers
+            self._hdr.setText(self._hdr_text())
+        except RuntimeError:
+            pass          # panel already torn down
 
     def _row_of(self, fp: str) -> int:
         """Row index of a file in DISPLAY order (≠ self.files order once
@@ -2015,6 +2042,8 @@ class SidePanelWidget(QWidget):
                 gone = True
                 break   # whole entry gone — nothing left to show
         self._hdr.setText(self._hdr_text())
+        self._refresh_counts()             # own folder rows
+        self._refresh_ancestor_counts()    # and the row that opened this panel
         if gone:
             self.close()
         ctrl._refresh()
@@ -2047,12 +2076,26 @@ class SidePanelWidget(QWidget):
         if changed and self.controller is not None:
             self.controller.history._save_history()
         self._hdr.setText(self._hdr_text())
+        # The folder row that opened THIS panel lives in the parent list and
+        # shows a count of what's inside — recompute it, or it keeps the old
+        # number while the user is looking at the shorter list.
+        self._refresh_ancestor_counts()
         # Repaint the main list too — the parent row's file-count badge is
         # computed from the entry, so without this it keeps the old number.
         if self.controller is not None:
             self.controller._refresh()
         if not self.files:
             self.close()   # everything in this folder view is hidden now
+
+    def _refresh_ancestor_counts(self):
+        """Walk up the panel chain refreshing folder counts."""
+        p = getattr(self, "_parent_panel", None)
+        while p is not None:
+            try:
+                p._refresh_counts()
+                p = getattr(p, "_parent_panel", None)
+            except RuntimeError:
+                break     # an ancestor is already gone
 
 
 # ── Main popup window ─────────────────────────────────────────────────────────
