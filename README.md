@@ -17,6 +17,7 @@
 - [Roadmap](#roadmap)
 - [Known Issues](#known-issues)
 - [Development Log](#development-log)
+- [Security Architecture](#security-architecture)
 - [License](#license)
 
 ---
@@ -216,6 +217,7 @@ Stacka/
 - [x] Adjustable UI sizing (window, rows, side list) in 10% steps
 - [x] Credit card detection — masked display, encrypted at rest (Windows DPAPI)
 - [x] Open files / folders / links straight from the list (right-click)
+- [x] Localisation — in-app language picker; 6 languages (French, Spanish, Italian, Russian, Chinese, Korean) plus English
 
 ### Future Ideas (v2+)
 - [ ] Auto-clear history after X days
@@ -449,6 +451,9 @@ A background thread (`_watch_signal_file`) was added to `context_menu.py`. It po
 | 2026-07-22 | Overlay button rewritten to position from the cursor — sits opposite the menu's growth quadrant and escapes past long / re-centred menus, raising above in-page menus when overlap is unavoidable; the three-tier menu detection (and the comtypes dependency) removed |
 | 2026-07-22 | Combined popup triggers — enable up to two at once (e.g. overlay button + double right-click); “Hotkey only” stays exclusive |
 | 2026-07-22 | Credit card detection (whole-clipboard) — regex + BIN/brand + Luhn checksum identify a copied card; the list shows a masked “Visa •••• 4242”, the real number is DPAPI-encrypted at rest and only decrypted in memory to paste |
+| 2026-07-25 | Windows packaging begun — standalone PyInstaller `.exe`; runtime paths made install-safe (user data → `%APPDATA%`, assets read from the bundle), and the Stacka icon added to the tray, taskbar, and windows |
+| 2026-07-25 | Localisation — in-app translation engine with a language picker in the Settings header; 6 languages added (French, Spanish, Italian, Russian, Chinese, Korean) covering Settings, the popup and its context menus, the tray menu, and the support buttons |
+| 2026-07-25 | Clipboard history and profiles encrypted at rest with Windows DPAPI — tied to the user account, no password needed, with automatic migration of existing plaintext data; security architecture documented |
 | 2026-07-25 | Renamed to Stacka — the original name conflicted with an existing commercial product, so the app, its documentation and its Windows integration were renamed before release |
 
 ---
@@ -460,6 +465,67 @@ Stacka is being built by **Cosmas** as a first software development project — 
 ---
 
 *Built with passion. Designed for simplicity.*
+
+---
+
+## Security Architecture
+
+A clipboard manager keeps a **history** of everything you copy, so a single
+stolen data file can expose far more than the live clipboard — passwords,
+tokens, and other secrets people routinely copy. Stacka is built around that
+risk.
+
+### No network attack surface
+
+Stacka is **entirely local**. It runs no server, opens no ports, and has no
+network listener, so there is nothing for a remote attacker to connect to.
+Clipboard data is **never transmitted anywhere** — no cloud sync, no telemetry,
+no analytics, no "phone home". Your clips never leave your machine. (The Support
+button simply opens the donation page in your browser; no clipboard data is
+involved.)
+
+### Encrypted at rest — Windows DPAPI
+
+The clipboard stores (`history.json`, `profiles.json`) are **encrypted at rest**
+with the Windows Data Protection API (`CryptProtectData`). The key is held by
+Windows and tied to your **user account**, so:
+
+- the files are unreadable to another Windows user on the same PC
+- the files are useless if copied off the machine, pulled from a backup, or
+  recovered from a stolen drive
+- **no master password is required** — protection is automatic and frictionless
+
+Credit-card numbers get the same DPAPI treatment individually, and are
+additionally **masked everywhere they are displayed** (`Visa •••• 4242`) and
+keyed by a random id rather than a content hash, since a hash of a card number
+is brute-forceable from the small space of valid numbers.
+
+Existing plaintext data from older versions is read normally and **migrated
+automatically** — it is simply rewritten encrypted on the next save. If DPAPI is
+ever unavailable, Stacka stores the data unencrypted and says so, rather than
+losing it.
+
+Writes stay **atomic** (`.tmp` → fsync → `.bak` → `os.replace`), so an
+interrupted write can never corrupt the store, and a `.bak` copy allows recovery.
+
+### Local data location
+
+| Mode | Location |
+|---|---|
+| Packaged app | `%APPDATA%\Stacka\` (per-user, outside `Program Files`) |
+| Running from source | the project folder (`data/`, `settings/`) |
+
+### What this does *not* protect against — stated plainly
+
+DPAPI protects data **at rest**. It cannot protect a session that is **already
+compromised**: malicious code running as *you*, while you are logged in, can ask
+Windows to decrypt the store — or simply read the live clipboard directly, with
+no need to touch Stacka at all. No local clipboard tool can prevent that. The
+realistic goals are protecting data at rest and shrinking the blast radius.
+
+Planned hardening: an optional master passphrase (key held only in memory),
+auto-clearing history after a set time, and an exclude-list so chosen apps
+(password managers, for example) are never captured.
 
 ---
 

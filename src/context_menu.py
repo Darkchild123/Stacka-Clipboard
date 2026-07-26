@@ -78,8 +78,21 @@ REG_PATHS = [
     r"Directory\Background\shell\Stacka",
 ]
 
-EXCLUDED_PROCESSES = {"explorer.exe"}
-EXCLUDED_WINDOW_CLASSES = {"CabinetWClass", "ExplorerWClass", "WorkerW"}
+# File Explorer and the Desktop used to be excluded from the overlay button,
+# because the registry-injected "Paste from Stacka" entry already served them
+# natively and a floating button on top of it was just noise.
+#
+# The Microsoft Store build has no shell entry at all: a packaged app's
+# registry writes are virtualized and never reach Explorer (declaring a real
+# package context menu needs a native IExplorerCommand DLL — see
+# msix/STORE-NOTES.md). Excluding Explorer there would leave right-click with
+# no Stacka entry point whatsoever.
+#
+# So the overlay is now offered everywhere. It stays entirely opt-in — it only
+# appears if the user picked the "Overlay button" trigger in Settings — and in
+# the installer build, where the shell entry does exist, both simply work.
+EXCLUDED_PROCESSES = set()
+EXCLUDED_WINDOW_CLASSES = set()
 
 OVERLAY_BG    = "#4f46e5"
 OVERLAY_HOVER = "#6366f1"
@@ -582,13 +595,27 @@ class ContextMenu:
 
     def _watch_signal_file(self):
         signal_path = os.path.join(tempfile.gettempdir(), "stacka.signal")
+        # Discard any signal left over from BEFORE this instance started —
+        # "Paste from Stacka" clicked while Stacka wasn't running writes
+        # the file with nothing to consume it. Without this, that stale file
+        # is picked up on the next launch and the popup springs open by
+        # itself instead of starting quietly in the tray.
+        try:
+            if os.path.exists(signal_path):
+                os.remove(signal_path)
+                print("Discarded a stale trigger signal from before startup.")
+        except Exception:
+            pass
         while self.running:
             try:
                 if os.path.exists(signal_path):
                     with open(signal_path, "r") as f:
                         content = f.read().strip()
                     os.remove(signal_path)
-                    nums = re.findall(r"\d+", content)
+                    # -?\d+ : a monitor placed left of / above the primary has
+                    # NEGATIVE screen coordinates — \d+ silently dropped the
+                    # minus and opened the popup on the wrong screen.
+                    nums = re.findall(r"-?\d+", content)
                     x, y = int(nums[0]), int(nums[1])
                     try:
                         self.popup._paste_target = win32gui.GetForegroundWindow()
@@ -878,18 +905,36 @@ class ContextMenu:
     # ── Registry ──────────────────────────────────────────────────────────────
 
     def _register_in_registry(self):
-        pythonw = sys.executable.replace("python.exe", "pythonw.exe")
-        if not os.path.exists(pythonw):
-            pythonw = sys.executable
-        command = (f'"{pythonw}" -c "import tempfile, pyautogui; '
-                   r"open(tempfile.gettempdir()+chr(92)+'stacka.signal','w').write(str(pyautogui.position()))" + '"')
+        # Menu icon: the frozen exe carries the embedded Stacka icon; in dev
+        # point straight at the .ico so the Stacka icon shows there too
+        # (instead of python.exe's icon).
+        from app_paths import is_frozen, resource_path
+        icon_value = (sys.executable + ",0") if is_frozen() \
+            else resource_path("assets", "stacka.ico")
+
+        # The menu entry drops a signal file with the cursor position, which
+        # the running instance picks up (_watch_signal_file). Both forms call
+        # Stacka's own --paste-signal mode:
+        #   frozen : "…\Stacka.exe" --paste-signal
+        #   dev    : "…\pythonw.exe" "…\src\main.py" --paste-signal
+        # (The old form passed `-c "<python code>"`, which the frozen exe
+        # cannot run — it is not a Python interpreter, so clicking the menu
+        # entry launched a second copy of the app instead of the popup.)
+        if is_frozen():
+            command = f'"{sys.executable}" --paste-signal'
+        else:
+            pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+            if not os.path.exists(pythonw):
+                pythonw = sys.executable
+            main_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+            command = f'"{pythonw}" "{main_py}" --paste-signal'
         for reg_path in REG_PATHS:
             try:
                 key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                     r"Software\Classes\\" + reg_path, 0,
                     winreg.KEY_SET_VALUE | winreg.KEY_CREATE_SUB_KEY)
                 winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Paste from Stacka")
-                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, sys.executable)
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, icon_value)
                 winreg.CloseKey(key)
                 cmd_key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,
                     r"Software\Classes\\" + reg_path + r"\command", 0, winreg.KEY_SET_VALUE)

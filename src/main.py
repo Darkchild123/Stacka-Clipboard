@@ -36,6 +36,54 @@ def _set_dpi_awareness():
 _set_dpi_awareness()
 
 
+# ── "--paste-signal" mode ───────────────────────────────────────────────────
+# The Explorer / Desktop right-click entry ("Paste from Stacka") can't call
+# into the already-running app directly, so it drops a signal file carrying the
+# cursor position; the running instance watches for it and opens the popup
+# there (see ContextMenu._watch_signal_file).
+#
+# The registry command used to be `pythonw.exe -c "<python>"`, which only works
+# when the app runs from source — the FROZEN Stacka.exe is not a Python
+# interpreter, so `Stacka.exe -c "..."` just launched a second copy of the app
+# instead of opening the popup. Now the exe (or main.py) is invoked with
+# --paste-signal and does the job itself.
+#
+# This runs BEFORE the PyQt6 imports so the helper process starts, writes one
+# small file and exits in milliseconds — it never builds a UI.
+def _write_paste_signal():
+    import ctypes, tempfile
+
+    class _PT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    pt = _PT()
+    try:
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    except Exception:
+        return 1
+    try:
+        path = os.path.join(tempfile.gettempdir(), "stacka.signal")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"Point(x={pt.x}, y={pt.y})")
+    except Exception:
+        return 1
+    return 0
+
+
+if "--paste-signal" in sys.argv:
+    sys.exit(_write_paste_signal())
+
+
+# Redirect stdout/stderr to %APPDATA%\Stacka\stacka.log. A --windowed build
+# has no console (print() would vanish), so this is the only diagnostic trail —
+# and it also captures uncaught tracebacks. Placed AFTER the --paste-signal exit
+# so the short-lived helper process never opens the log, and BEFORE the heavy
+# imports so an import-time failure is recorded too. Running from source, output
+# still appears on the console as well.
+import applog
+applog.setup()
+
+
 def _set_app_user_model_id():
     # Windows: give the process its own taskbar identity so it shows Stacka's
     # icon (not the Python launcher's) and pins / groups as its own app.
@@ -55,6 +103,9 @@ os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.fonts.warning=false")
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import Qt
 from PyQt6.QtGui     import QIcon
+
+from app_paths import resource_path
+import i18n
 
 from clipboard_watcher import ClipboardWatcher
 from history_manager   import HistoryManager
@@ -89,17 +140,18 @@ def main():
 
     # App-wide window icon — taskbar, Alt+Tab, and every window's title bar.
     # Prefer the multi-size .ico (Windows picks the crispest per context),
-    # fall back to the PNG.
-    _assets = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           "assets")
+    # fall back to the PNG. resource_path() locates them in the bundle when frozen.
     for _name in ("stacka.ico", "icon.png"):
-        _p = os.path.join(_assets, _name)
+        _p = resource_path("assets", _name)
         if os.path.exists(_p):
             app.setWindowIcon(QIcon(_p))
             break
 
     # Step 2: History Manager
     history = HistoryManager()
+
+    # Apply the saved UI language before any window is built.
+    i18n.set_language(history.settings.get("language", "en"))
 
     # Step 3: Profile Manager
     profiles = ProfileManager(history)
@@ -130,6 +182,16 @@ def main():
     # Expose the tray app-wide so DropdownPopup._show_toast can post
     # balloon notifications without a circular import.
     app.setProperty("stacka_tray", tray)
+
+    # Step 8: Auto-wipe — run any schedule that fell due while the app was
+    # closed, then check hourly. Pinned items are always kept.
+    import auto_wipe
+    from PyQt6.QtCore import QTimer
+    auto_wipe.run_if_due(history, profiles)
+    _wipe_timer = QTimer()
+    _wipe_timer.timeout.connect(lambda: auto_wipe.run_if_due(history, profiles))
+    _wipe_timer.start(60 * 60 * 1000)          # hourly
+    app.setProperty("stacka_wipe_timer", _wipe_timer)   # keep a reference alive
 
     print("Stacka is running.")
     print("  Right-click anywhere → 'Paste from Stacka'")

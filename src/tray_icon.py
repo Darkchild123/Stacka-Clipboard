@@ -16,8 +16,10 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PyQt6.QtGui     import QIcon, QPixmap, QImage, QAction
 from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject
 
-BASE_DIR  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ICON_PATH = os.path.join(BASE_DIR, "assets", "icon.png")
+from app_paths import resource_path
+import i18n
+
+ICON_PATH = resource_path("assets", "icon.png")
 
 
 def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
@@ -36,6 +38,11 @@ class TrayIcon:
         self._tray         = None
         self._icon_img     = self._load_icon()
         self._settings_win = None   # keep reference — prevents GC crash
+        # Menu actions, kept so retranslate() can relabel them live.
+        self._profile_action = None
+        self._settings_act   = None
+        self._clear_act      = None
+        self._quit_act       = None
 
     def start(self):
         """Called from the main thread — creates the tray icon immediately."""
@@ -51,7 +58,7 @@ class TrayIcon:
     def _create_tray(self):
         # Prefer the multi-size .ico (crisp at the small tray sizes); fall back
         # to the PIL-loaded icon.png / generated placeholder.
-        ico = os.path.join(BASE_DIR, "assets", "stacka.ico")
+        ico = resource_path("assets", "stacka.ico")
         if os.path.exists(ico):
             icon = QIcon(ico)
         else:
@@ -78,15 +85,17 @@ class TrayIcon:
         self._profile_action.setEnabled(False)
         menu.addSeparator()
 
-        settings_act = menu.addAction("⚙  Settings")
-        settings_act.triggered.connect(self._open_settings)
+        # Kept on self so retranslate() can relabel them when the user
+        # switches language — the menu is built once, at startup.
+        self._settings_act = menu.addAction("⚙  " + i18n.tr("Settings"))
+        self._settings_act.triggered.connect(self._open_settings)
 
-        clear_act = menu.addAction("🧹 Clear History")
-        clear_act.triggered.connect(self._clear_history)
+        self._clear_act = menu.addAction("🧹 " + i18n.tr("Clear History"))
+        self._clear_act.triggered.connect(self._clear_history)
         menu.addSeparator()
 
-        quit_act = menu.addAction("✖  Quit Stacka")
-        quit_act.triggered.connect(self._quit)
+        self._quit_act = menu.addAction("✖  " + i18n.tr("Quit Stacka"))
+        self._quit_act.triggered.connect(self._quit)
 
         # Refresh profile label each time menu opens
         menu.aboutToShow.connect(self._refresh_profile_action)
@@ -96,13 +105,31 @@ class TrayIcon:
 
     def _profile_label(self) -> str:
         try:
-            return f"Profile: {self.profiles.get_active_profile()['name']}"
+            return f"{i18n.tr('Profile:')} {self.profiles.get_active_profile()['name']}"
         except Exception:
-            return "Profile: General"
+            return f"{i18n.tr('Profile:')} General"
 
     def _refresh_profile_action(self):
         if self._profile_action:
             self._profile_action.setText(self._profile_label())
+
+    def retranslate(self):
+        """Relabel the tray menu in the current language.
+
+        The menu is built once at startup, so without this a language change
+        left the tray stuck in the old language until the app restarted.
+        Called by SettingsPanel the moment the language is switched.
+        """
+        try:
+            if self._settings_act:
+                self._settings_act.setText("⚙  " + i18n.tr("Settings"))
+            if self._clear_act:
+                self._clear_act.setText("🧹 " + i18n.tr("Clear History"))
+            if self._quit_act:
+                self._quit_act.setText("✖  " + i18n.tr("Quit Stacka"))
+            self._refresh_profile_action()
+        except RuntimeError:
+            pass          # tray torn down
 
     # ── Tray activated ───────────────────────────────────────────────────────
 
@@ -124,12 +151,19 @@ class TrayIcon:
         self._settings_win.show()
 
     def _clear_history(self):
+        # Clear EVERY list, matching the Settings button — clearing only
+        # General while profiles kept their copies was the surprising part.
         self.history.clear_all()
+        if self.profiles:
+            try:
+                self.profiles.clear_all_profiles()
+            except Exception as e:
+                print(f"[Stacka] Could not clear profiles: {e}")
         print("History cleared from tray menu.")
         if self._tray:
             self._tray.showMessage(
                 "Stacka",
-                "Clipboard history has been cleared.",
+                i18n.tr("Clipboard history has been cleared."),
                 QSystemTrayIcon.MessageIcon.Information,
                 2000
             )

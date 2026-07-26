@@ -30,7 +30,9 @@ import shutil
 import uuid
 
 
-BASE_DIR      = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import secure_store
+from app_paths import user_data_root
+BASE_DIR      = user_data_root()
 DATA_DIR      = os.path.join(BASE_DIR, "data")
 PROFILES_FILE = os.path.join(DATA_DIR, "profiles.json")
 # Per-profile image copies live here, one sub-folder per profile id.
@@ -259,21 +261,42 @@ class ProfileManager:
         self._save()
 
 
-    def clear_profile(self, profile_id):
+    def clear_profile(self, profile_id, keep_pinned: bool = False):
         """
         Removes all items from a named profile (and their copied images).
         General cannot be cleared this way — use history.clear_all() instead.
+
+        keep_pinned=True spares items pinned IN THIS PROFILE (auto-wipe).
         """
         if profile_id == GENERAL_ID:
             return
         profile = self._find(profile_id)
-        if profile:
-            for it in profile.get("items", []):
+        if not profile:
+            return
+        pinned_ids = set(profile.get("pinned_item_ids", [])) if keep_pinned else set()
+        kept = []
+        for it in profile.get("items", []):
+            if it["id"] in pinned_ids:
+                kept.append(it)
+            else:
                 self._delete_item_image(it, profile_id)
-            profile["items"] = []
-            profile["pinned_item_ids"] = []
-            self._save()
-            print(f"Profile cleared: {profile_id}")
+        profile["items"] = kept
+        profile["pinned_item_ids"] = [i for i in profile.get("pinned_item_ids", [])
+                                      if any(k["id"] == i for k in kept)]
+        self._save()
+        print(f"Profile cleared: {profile_id} ({len(kept)} pinned kept)")
+
+
+    def clear_all_profiles(self, keep_pinned: bool = False):
+        """Clear every NAMED profile. General is the live history and is
+        cleared through HistoryManager.clear_all() by the caller."""
+        n = 0
+        for p in list(self.profiles):
+            if p["id"] == GENERAL_ID or p.get("built_in"):
+                continue
+            self.clear_profile(p["id"], keep_pinned=keep_pinned)
+            n += 1
+        return n
 
 
     def remove_item_from_all(self, item_id):
@@ -424,30 +447,11 @@ class ProfileManager:
         half-written (corrupt) state.  A backup copy (.bak) is also kept so
         _load() can recover from any remaining edge-case corruption.
         """
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            tmp_path = PROFILES_FILE + ".tmp"
-            bak_path = PROFILES_FILE + ".bak"
-            payload  = {"active_id": self.active_id, "profiles": self.profiles}
-
-            # Write to temp file — if this fails, the real file is untouched
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-            # Back up the current good file before replacing it
-            if os.path.exists(PROFILES_FILE):
-                try:
-                    shutil.copy2(PROFILES_FILE, bak_path)
-                except Exception:
-                    pass   # backup failure is non-fatal
-
-            # Atomic replace — tmp becomes the live file
-            os.replace(tmp_path, PROFILES_FILE)
-
-        except Exception as e:
-            print(f"Failed to save profiles: {e}")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        payload = {"active_id": self.active_id, "profiles": self.profiles}
+        # Encrypted at rest (DPAPI) with the same atomic .tmp → .bak →
+        # os.replace strategy. See secure_store.py.
+        secure_store.write_json(PROFILES_FILE, payload)
 
 
     def _load(self):
@@ -468,8 +472,9 @@ class ProfileManager:
             if not os.path.exists(path):
                 continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = secure_store.read_json(path)
+                if data is None:
+                    raise ValueError("unreadable")
 
                 self.profiles = data.get("profiles", self._default_profiles())
                 saved_id      = data.get("active_id", GENERAL_ID)

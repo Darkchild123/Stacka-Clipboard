@@ -46,3 +46,8 @@ src/trigger_popup.py
 # PyInstaller build spec — regenerated (and overwritten) by every
 # --noconfirm build, so tracking it only produces phantom diffs.
 *.spec
+
+# MSIX build output (build_msix.ps1 regenerates both)
+msix_staging/
+msix_output/
+*.msix

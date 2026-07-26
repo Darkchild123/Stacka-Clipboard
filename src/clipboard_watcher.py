@@ -7,6 +7,7 @@
 # from, and sends it to the History Manager to be saved.
 # ============================================================
 
+import ctypes
 import time
 import re
 import win32clipboard
@@ -25,6 +26,19 @@ _URL_RE = re.compile(r'^(https?://|www\.)[^\s]{4,}$', re.IGNORECASE)
 _HEX_RE = re.compile(r'^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$')
 
 
+def _clipboard_seq():
+    """Windows' clipboard sequence number, or None if it can't be read.
+
+    It increments on EVERY copy — including re-copying identical content,
+    which a content hash cannot distinguish from "nothing happened". That is
+    the difference that makes re-copying a clip you deleted work.
+    """
+    try:
+        return ctypes.windll.user32.GetClipboardSequenceNumber()
+    except Exception:
+        return None
+
+
 class ClipboardWatcher:
 
     def __init__(self, history_manager):
@@ -35,6 +49,10 @@ class ClipboardWatcher:
         # We keep track of the last thing we saw in the clipboard
         # so we don't save the same item twice in a row
         self.last_seen = None
+
+        # Clipboard sequence number of the last state we examined. This — not
+        # the content hash — decides whether something new happened.
+        self._last_seq = None
 
         # How often we check the clipboard (in seconds)
         # 0.5 = twice per second — fast enough to feel instant
@@ -75,12 +93,31 @@ class ClipboardWatcher:
         print("Clipboard watcher stopped.")
 
 
+    def mark_current_clipboard(self):
+        """Treat whatever is on the clipboard RIGHT NOW as already seen.
+
+        Called after the app writes the clipboard itself (a paste), so the
+        watcher doesn't capture its own write as a fresh copy. Must run
+        BEFORE un-pausing, or the next poll grabs it.
+        """
+        seq = _clipboard_seq()
+        if seq is not None:
+            self._last_seq = seq
+
+
     def check_clipboard(self):
         """
         Checks the clipboard for new content.
         If something new is found, it figures out what type it is
         and sends it to the history manager.
         """
+        # Has the clipboard actually changed since we last looked? Re-copying
+        # the SAME thing bumps this number, so a clip the user deleted can be
+        # captured again by simply copying it a second time.
+        seq = _clipboard_seq()
+        if seq is not None and seq == self._last_seq:
+            return
+
         try:
             win32clipboard.OpenClipboard()
 
@@ -106,22 +143,22 @@ class ClipboardWatcher:
             else:
                 # Nothing we recognise in the clipboard
                 win32clipboard.CloseClipboard()
+                self._last_seq = seq     # examined — don't re-check this state
                 return
 
             win32clipboard.CloseClipboard()
 
         except Exception:
+            # Clipboard busy (another app holds it) — leave _last_seq alone so
+            # this state is retried on the next poll.
             try:
                 win32clipboard.CloseClipboard()
             except:
                 pass
             return
 
-        # If it's the same as the last thing we saw, skip it
-        if content_id == self.last_seen:
-            return
-
-        # It's new! Update what we last saw
+        # This clipboard state has now been examined.
+        self._last_seq = seq
         self.last_seen = content_id
 
         # Find out where it was copied from
@@ -153,7 +190,9 @@ class ClipboardWatcher:
                         "source":  source,
                         "pinned":  False,
                     })
-                    print(f"New item captured: [card] {card['brand']} ****{card['last4']}")
+                    # No brand/last4 here: the log is plaintext on disk while
+                    # the card itself is encrypted (see applog.py privacy note).
+                    print("New item captured: [card]")
                     return
 
         # Build a clipboard item as a dictionary
@@ -168,7 +207,10 @@ class ClipboardWatcher:
 
         # Send the item to the History Manager to be saved
         self.history.add_item(item)
-        print(f"New item captured: [{content_type}] from {source}")
+        # The source is the active window's title (a document name, a page
+        # title, a URL…) — clipboard metadata, so it is deliberately NOT
+        # written to the plaintext log. Type only.
+        print(f"New item captured: [{content_type}]")
 
 
     def _classify_text(self, text):

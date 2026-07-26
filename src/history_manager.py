@@ -13,9 +13,12 @@ from PIL import Image
 
 
 # --- File paths for saving data ---
-# os.path.dirname(__file__) means "the folder this file is in" (src/)
-# We then go one level up (..) to reach the project root
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# app_paths.user_data_root() is the project root in dev, but %APPDATA%\Stacka
+# when running as the packaged app — so an installed copy writes history and
+# settings to a per-user, writable location instead of next to the exe.
+import secure_store
+from app_paths import user_data_root
+BASE_DIR = user_data_root()
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SETTINGS_DIR = os.path.join(BASE_DIR, "settings")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
@@ -171,6 +174,11 @@ class HistoryManager:
             url = item["content"].strip()
             return url[:120] + "..." if len(url) > 120 else url
 
+        if item["type"] == "hex":
+            # The colour code IS the preview — "#4F46E5". Without this branch
+            # a hex clip fell through to the catch-all and read "Unknown item".
+            return str(item["content"]).strip()
+
         if item["type"] in ("code", "bash"):
             import re
             # Show the first non-empty line as the preview
@@ -199,6 +207,12 @@ class HistoryManager:
         elif item["type"] == "image":
             return "📷 Image"
 
+        # Catch-all for any type added later: show the content rather than a
+        # useless "Unknown item" label.
+        content = item.get("content")
+        if isinstance(content, str) and content.strip():
+            text = " ".join(content.split())
+            return text[:120] + "..." if len(text) > 120 else text
         return "Unknown item"
 
 
@@ -294,20 +308,32 @@ class HistoryManager:
     # CLEAR ALL
     # ============================================================
 
-    def clear_all(self):
+    def clear_all(self, keep_pinned: bool = False):
         """
-        Deletes all clipboard history.
-        Also cleans up any saved image files.
-        """
-        # Delete all saved image files
-        for item in self.items:
-            if item["type"] == "image" and os.path.exists(item["content"]):
-                os.remove(item["content"])
+        Deletes all clipboard history, and the image files that go with it.
 
-        # Clear the list
-        self.items = []
+        keep_pinned=True spares pinned items. Auto-wipe uses that, because a
+        pinned item is the user saying "never remove this automatically";
+        the manual Clear button passes False and removes everything.
+        """
+        kept     = [i for i in self.items if i.get("pinned")] if keep_pinned else []
+        kept_ids = {i["id"] for i in kept}
+
+        for item in self.items:
+            if item["id"] in kept_ids:
+                continue
+            # content is a PATH for images; guard the type — a malformed entry
+            # must not take the whole clear down.
+            if item.get("type") == "image" and isinstance(item.get("content"), str):
+                try:
+                    if os.path.exists(item["content"]):
+                        os.remove(item["content"])
+                except OSError:
+                    pass
+
+        self.items = kept
         self._save_history()
-        print("History cleared.")
+        print(f"History cleared ({len(kept)} pinned item(s) kept).")
 
 
     # ============================================================
@@ -400,37 +426,22 @@ class HistoryManager:
 
     def _save_history(self):
         """
-        Saves the current history list to history.json using an atomic write.
+        Saves the current history list to history.json, ENCRYPTED AT REST.
 
-        Writes to a .tmp file first, then os.replace() atomically promotes it.
-        A .bak copy is kept so _load_history() can recover from corruption.
+        secure_store.write_json keeps the original atomic strategy (.tmp →
+        fsync → .bak → os.replace) and DPAPI-encrypts the JSON, so the stored
+        clipboard is unreadable to another Windows user or if the file is
+        copied off the machine. See secure_store.py for scope and limits.
         """
-        try:
-            tmp_path = HISTORY_FILE + ".tmp"
-            bak_path = HISTORY_FILE + ".bak"
-
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self.items, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-
-            if os.path.exists(HISTORY_FILE):
-                try:
-                    import shutil
-                    shutil.copy2(HISTORY_FILE, bak_path)
-                except Exception:
-                    pass
-
-            os.replace(tmp_path, HISTORY_FILE)
-
-        except Exception as e:
-            print(f"Failed to save history: {e}")
+        secure_store.write_json(HISTORY_FILE, self.items)
 
 
     def _load_history(self):
         """
         Loads history from history.json.
-        Falls back to history.json.bak if the main file is corrupt.
+        Reads BOTH the encrypted format and legacy plaintext (an existing
+        plaintext history is migrated on the next save). Falls back to
+        history.json.bak if the main file is corrupt or undecryptable.
         """
         bak_path = HISTORY_FILE + ".bak"
 
@@ -438,8 +449,9 @@ class HistoryManager:
             if not os.path.exists(path):
                 continue
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                data = secure_store.read_json(path)
+                if data is None:
+                    raise ValueError("unreadable")
                 if path == bak_path:
                     print("History recovered from backup.")
                 return data
