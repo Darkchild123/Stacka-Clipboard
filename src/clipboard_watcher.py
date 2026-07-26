@@ -181,8 +181,13 @@ class ClipboardWatcher:
                 enc = card_detect.encrypt(card["number"])
                 if enc:
                     import uuid
+                    # Re-use the id of the same card already in the list, so a
+                    # repeat copy moves it to the top instead of adding another
+                    # row. A fresh random id otherwise — NEVER a hash of the
+                    # number (see HistoryManager.find_card_id).
+                    existing = self.history.find_card_id(card["number"])
                     self.history.add_item({
-                        "id":      str(uuid.uuid4()),   # random — NEVER a hash of the number
+                        "id":      existing or str(uuid.uuid4()),
                         "type":    "card",
                         "content": enc,                 # ciphertext, not the number
                         "brand":   card["brand"],
