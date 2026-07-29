@@ -854,12 +854,17 @@ class ItemRowWidget(QWidget):
         self.history  = history
         self.profiles = profiles
         self.C        = colours
-        # Eased hover animation. OutExpo ≈ the old exponential-chase lerp:
-        # instant response, long soft landing — the "fluid" feel.
+        # Eased hover animation, tuned to keep up with the cursor.
+        #
+        # This was 250 ms of OutExpo, which spends most of its time in a long
+        # soft tail: the row was still finishing its fade well after the mouse
+        # had moved on, so the highlight visibly trailed the pointer. 110 ms of
+        # OutCubic lands almost immediately and still eases rather than
+        # snapping, so hovering down a list now tracks the cursor.
         self._anim_t = 0.0
         self._anim   = QVariantAnimation(self)
-        self._anim.setDuration(250)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutExpo)
+        self._anim.setDuration(110)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_anim_value)
 
         # Drag / selection state
@@ -2249,9 +2254,18 @@ class _OpenWorker(QThread):
             return
         try:
             if self._reveal:
-                # Explorer wants "/select,PATH" as ONE token; this opens the
-                # parent folder with the item highlighted (works for folders).
-                subprocess.Popen(["explorer", "/select," + os.path.normpath(p)])
+                # Open the containing folder with the item highlighted.
+                #
+                # This MUST be one command-line STRING with only the PATH
+                # quoted:   explorer /select,"C:\dir\file.txt"
+                # Passing a list instead let Python quote the whole argument
+                # whenever the path contained a space —
+                #   explorer "/select,C:\My Documents\file.txt"
+                # — which Explorer cannot parse. It then silently fell back to
+                # its default folder, so files under any path with a space
+                # opened Documents instead of where they actually live.
+                target = os.path.normpath(p)
+                subprocess.Popen(f'explorer /select,"{target}"')
             else:
                 os.startfile(p)          # default handler for its type
         except Exception as e:
