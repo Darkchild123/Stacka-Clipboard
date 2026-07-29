@@ -23,7 +23,6 @@ import hashlib
 import subprocess
 import webbrowser
 
-from donate import DONATE_URL, open_donation_page
 import i18n
 
 import win32clipboard
@@ -2631,12 +2630,10 @@ class DropdownPopup(QObject):
         main_lay.addWidget(scroll, 1)
         self._scroll = scroll
 
-        # ── Footer: author credit + Support link ──────────────────────────────
-        # A slim always-visible strip that doubles as the author credit and the
-        # donate entry point. Kept to one thin line so it never steals room from
-        # the item list. The heart opens the Paystack page via webbrowser — the
-        # same call the row "Open link" action uses, and robust on this
-        # WS_EX_NOACTIVATE window (a plain browser launch, no focus needed).
+        # ── Footer: author credit ─────────────────────────────────────────────
+        # STORE BUILD: no Support/donation link here. This is the paid Store
+        # edition, so asking a paying customer for a donation would be odd.
+        # The free build on the other branches keeps it.
         sep3 = QFrame(popup); sep3.setFrameShape(QFrame.Shape.HLine)
         sep3.setStyleSheet(f"color:{C['border']};")
         main_lay.addWidget(sep3)
@@ -2649,15 +2646,8 @@ class DropdownPopup(QObject):
         fl.setSpacing(6)
         credit = QLabel("Made by Cosmas", footer)
         credit.setStyleSheet(f"color:{C['text_dim']};background:transparent;font-size:11px;")
-        support = QLabel("🎁 " + i18n.tr("Support"), footer)
-        support.setStyleSheet(
-            "color:#e11d6b;background:transparent;font-size:12px;font-weight:900;")
-        support.setCursor(Qt.CursorShape.PointingHandCursor)
-        support.setToolTip(i18n.tr("Support Stacka's development"))
-        support.mousePressEvent = lambda e: open_donation_page()
         fl.addWidget(credit)
         fl.addStretch()
-        fl.addWidget(support)
         main_lay.addWidget(footer)
 
         # Connect search

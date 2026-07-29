@@ -20,7 +20,6 @@ import math
 import i18n
 import auto_wipe
 import app_paths
-from donate import DONATE_URL, open_donation_page
 
 APP_NAME    = "Stacka"
 APP_VERSION = "1.0.0"
@@ -1335,16 +1334,9 @@ class SettingsPanel(QWidget):
         _link_row("Source:", GITHUB_URL)
         _link_row("Developer:", GITHUB_PROFILE_URL)
 
-        # ── Support / donation button ──────────────────────────────────────────
-        # A warm rose face so it stands out from the indigo chrome and reads as
-        # a "support" action, not another settings control. Opens the Paystack
-        # page via the shared open_donation_page() helper (same as the footer).
-        lay.addSpacing(8)
-        donate = QPushButton("🎁  " + i18n.tr("Support Stacka"), w)
-        donate.setCursor(Qt.CursorShape.PointingHandCursor)
-        donate.setStyleSheet(_btn_style("#e11d6b", "#ec4899"))
-        donate.clicked.connect(lambda: open_donation_page())
-        lay.addWidget(donate)
+        # STORE BUILD: no Support/donation button. This is the paid Store
+        # edition — a paying customer should not also be asked to donate.
+        # The free build on the other branches keeps it here.
         return w
 
     def _heading(self, text: str) -> QLabel:
