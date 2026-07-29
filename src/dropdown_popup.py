@@ -38,7 +38,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QScrollArea, QFrame,
     QAbstractItemView, QMenu, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStyledItemDelegate,
-    QMessageBox, QInputDialog,
+    QMessageBox, QInputDialog, QPlainTextEdit,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
@@ -48,6 +48,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QFontMetrics,
     QPixmap, QImage, QCursor, QIcon, QPalette, QPolygonF, QDrag,
+    QTextOption,
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -932,13 +933,28 @@ class ItemRowWidget(QWidget):
         # text now widens with the window.
         self._preview_lbl.setSizePolicy(QSizePolicy.Policy.Ignored,
                                         QSizePolicy.Policy.Preferred)
-        self._preview_lbl.setFont(QFont("Segoe UI", max(6, int(10 * _FONT_SCALE))))
+        _prev_font = QFont("Segoe UI", max(6, int(10 * _FONT_SCALE)))
+        _src_font  = QFont("Segoe UI", max(6, int(8 * _FONT_SCALE)))
+        self._preview_lbl.setFont(_prev_font)
         self._preview_lbl.setStyleSheet(f"color:{C['text_preview']};background:transparent;")
+        # Show only WHOLE lines. A wrapped QLabel vertically CENTRES its text,
+        # so when a clip was taller than the row it was cropped top AND bottom
+        # — slicing characters in half and making them unreadable. Pin the
+        # label to an exact whole number of lines and top-align it: the lines
+        # that fit are shown in full, and anything past them is hidden cleanly
+        # at a line boundary rather than mid-character. "Expand" (right-click)
+        # reveals the whole thing.
+        _line_h  = QFontMetrics(_prev_font).lineSpacing()
+        _avail   = ITEM_HEIGHT - 12 - QFontMetrics(_src_font).height() - 2
+        _n_lines = max(1, _avail // max(1, _line_h))
+        self._preview_lbl.setFixedHeight(_n_lines * _line_h)
+        self._preview_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft |
+                                       Qt.AlignmentFlag.AlignTop)
         text_col.addWidget(self._preview_lbl)
 
         src = item.get("source","Unknown")
         self._source_lbl = QLabel(f"From: {src}", self)
-        self._source_lbl.setFont(QFont("Segoe UI", max(6, int(8 * _FONT_SCALE))))
+        self._source_lbl.setFont(_src_font)
         self._source_lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
         # A long "From: C:\...\path" has no wordwrap, so its full text width
         # would force the whole ROW wider than the window — clipping the text
@@ -2102,6 +2118,135 @@ class SidePanelWidget(QWidget):
                 break     # an ancestor is already gone
 
 
+# ── "Expand": peek at a text clip's full content ──────────────────────────────
+
+class TextPeekPanel(QWidget):
+    """A light flyout that shows a text clip's WHOLE content with a scrollbar.
+
+    The main-list row only shows the first line or two (clipped to whole
+    lines). "Expand" on the right-click menu opens this so the user can
+    confirm they have the right clip. It is deliberately compact — sized to
+    CHECK the text, not to sit and read it — with a header smaller than the
+    file side-list's, mirroring that panel's frameless / no-activate / shadow
+    recipe so it behaves the same on this WS_EX_NOACTIVATE window.
+    """
+
+    PANEL_W = 340
+    LINES   = 9        # visible lines before it scrolls — enough to verify
+
+    def __init__(self, text: str, colours: dict, parent_popup, controller):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint |
+                               Qt.WindowType.WindowStaysOnTopHint |
+                               Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        _set_no_activate(int(self.winId()))
+
+        self.C             = colours
+        self._parent_popup = parent_popup
+        self.controller    = controller
+        self._close_timer  = QTimer(self)
+        self._close_timer.setSingleShot(True)
+        self._close_timer.timeout.connect(self._close_if_cursor_outside)
+
+        # Same elevation recipe as SidePanelWidget: rounded card + drop shadow
+        # inside transparent margins (blur + |offset| must fit the margins).
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 17)
+        card = QWidget(self)
+        card.setObjectName("peek_card")
+        card.setStyleSheet(
+            f"QWidget#peek_card {{background:{colours['bg']};"
+            f"border:1px solid {colours['border']};border-radius:8px;}}")
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(11)
+        _shadow.setOffset(0, 2)
+        _shadow.setColor(QColor(0, 0, 0, 140))
+        card.setGraphicsEffect(_shadow)
+        outer.addWidget(card)
+
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(0)
+
+        # Header — smaller than the file panel's (22 vs 28), since this is a
+        # utility peek. Shows a length hint so a long clip is obvious.
+        n = len(text)
+        hdr_row = QWidget(card)
+        hdr_row.setFixedHeight(22)
+        hdr_row.setStyleSheet(
+            f"background:{_grad_v(colours['accent_light'], _shade(colours['accent'], -0.18))};"
+            f"border-top-left-radius:7px;border-top-right-radius:7px;"
+            f"border-bottom:1px solid rgba(0,0,0,90);")
+        hl = QHBoxLayout(hdr_row)
+        hl.setContentsMargins(8, 0, 8, 0)
+        hdr = QLabel(f"{i18n.tr('Full text')} — {n:,} {i18n.tr('chars')}", hdr_row)
+        hdr.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        hdr.setStyleSheet("color:white;background:transparent;")
+        hl.addWidget(hdr)
+        hl.addStretch()
+        lay.addWidget(hdr_row)
+
+        # Body — read-only plain text, word-wrapped, with the shared scrollbar.
+        # QPlainTextEdit stays cheap even for very large clips (it lays out
+        # lazily), which is why it is used rather than a QLabel.
+        view = QPlainTextEdit(card)
+        view.setPlainText(text)
+        view.setReadOnly(True)
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        view.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        view.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        _fpx = 9
+        view.setStyleSheet(
+            f"QPlainTextEdit {{background:{colours['bg']};color:{colours['text']};"
+            f"border:none;padding:5px 6px;font-family:'Segoe UI';font-size:{_fpx}pt;"
+            f"selection-background-color:{colours['bg_hover']};}}"
+            + _scrollbar_qss(colours))
+        line_h = QFontMetrics(view.font()).lineSpacing()
+        view.setFixedWidth(self.PANEL_W)
+        view.setFixedHeight(self.LINES * line_h + 10)
+        self._view = view
+        lay.addWidget(view)
+
+    # ── Close behaviour: hover-out (like the side panels) + Escape ────────────
+    def arm_close_timer(self):
+        self._close_timer.start(250)
+
+    def cancel_close_timer(self):
+        self._close_timer.stop()
+
+    def _close_if_cursor_outside(self):
+        try:
+            if self.isVisible() and self.frameGeometry().contains(QCursor.pos()):
+                return   # cursor is inside me — stay open
+        except RuntimeError:
+            return
+        self.close()
+
+    def enterEvent(self, e):
+        self.cancel_close_timer()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.arm_close_timer()
+        super().leaveEvent(e)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        ctrl = self.controller
+        if ctrl is not None and getattr(ctrl, "_text_panel", None) is self:
+            ctrl._text_panel = None
+        super().closeEvent(e)
+
+
 # ── Main popup window ─────────────────────────────────────────────────────────
 
 class _PopupWindow(QWidget):
@@ -2468,6 +2613,7 @@ class DropdownPopup(QObject):
 
         self._popup       = None   # The QWidget window
         self._side_panel  = None   # SidePanelWidget if open
+        self._text_panel  = None   # TextPeekPanel ("Expand") if open
         self._panel_row   = None   # row whose side panel is open (stays lit)
         self._paste_target = None  # hwnd of window that was focused at right-click
         self._paste_worker = None  # _PasteWorker QThread while a paste runs
@@ -3111,6 +3257,14 @@ class DropdownPopup(QObject):
             QMenu::item:selected {{ background:{self._colours['bg_hover']}; }}
         """)
 
+        # ── Expand — peek at the full text of a clip the row only shows a
+        # line or two of. Offered for the text-bearing types whose preview is
+        # truncated (plain text, and code/bash which show only their first
+        # line). NEVER for card — its content is an encrypted number. ──
+        if item.get("type") in ("text", "code", "bash"):
+            menu.addAction("🔎  " + i18n.tr("Expand")).setData(("expand", None))
+            menu.addSeparator()
+
         # ── Open actions (no filesystem access here — string checks only) ──
         if item.get("type") == "url":
             menu.addAction("🌐  " + i18n.tr("Open link")).setData(("openurl", str(item.get("content", ""))))
@@ -3162,7 +3316,9 @@ class DropdownPopup(QObject):
         if not data:
             return
         action, value = data
-        if action == "open":
+        if action == "expand":
+            self._open_text_panel(item, gpos)
+        elif action == "open":
             self.open_path(value)
         elif action == "reveal":
             self.open_path(value, reveal=True)
@@ -3186,6 +3342,48 @@ class DropdownPopup(QObject):
                 self._delete_selected()
             else:
                 self._delete_item(item)
+
+    def _open_text_panel(self, item: dict, gpos: QPoint):
+        """Open the TextPeekPanel showing this clip's whole content, beside
+        the popup and level with where the menu was invoked."""
+        if not self._popup:
+            return
+        # Close any panel already up — only one peek at a time.
+        if self._text_panel:
+            try:
+                self._text_panel.cancel_close_timer()
+                self._text_panel.close()
+            except Exception:
+                pass
+            self._text_panel = None
+
+        text = str(item.get("content", ""))
+        panel = TextPeekPanel(text, self._colours, self._popup, controller=self)
+        self._text_panel = panel
+
+        # Flyout placement: prefer the right of the popup, fall back to the
+        # left near the right screen edge — the same rule the file side panel
+        # uses. Vertically anchor near the cursor/menu point, clamped on-screen.
+        pw, ph = panel.width(), panel.height()
+        pop    = self._popup.geometry()
+        screen = (QApplication.screenAt(pop.center())
+                  or QApplication.primaryScreen())
+        g = screen.availableGeometry()
+
+        space_right = g.right() - pop.right()
+        space_left  = pop.left() - g.left()
+        if space_right >= pw or space_right >= space_left:
+            px = pop.right() - 30
+        else:
+            px = pop.left() - pw + 30
+        px = max(g.left(), min(px, g.right() - pw))
+
+        top_inset = panel.layout().contentsMargins().top() if panel.layout() else 0
+        py = gpos.y() - top_inset
+        py = max(g.top(), min(py, g.bottom() - ph))
+
+        panel.move(px, py)
+        panel.show()
 
     def _new_profile_with_item(self, item: dict):
         """Prompt for a name, create the profile, and add this clip to it."""
@@ -3640,6 +3838,13 @@ class DropdownPopup(QObject):
             except Exception:
                 pass
             self._side_panel = None
+        # The Expand peek is always transient — never kept across a rebuild.
+        if self._text_panel:
+            try:
+                self._text_panel.close()
+            except Exception:
+                pass
+            self._text_panel = None
         if self._popup:
             try:
                 self._popup.close()
@@ -3709,6 +3914,14 @@ class DropdownPopup(QObject):
                 p = p._sub_panel
             except RuntimeError:
                 break
+        tp = self._text_panel               # the Expand peek, if open
+        if tp is not None:
+            try:
+                if tp.isVisible() and tp.frameGeometry().contains(gp):
+                    self._hover_seen_inside = True
+                    return
+            except RuntimeError:
+                pass
         # Cursor is outside everything. Only close if it was inside at
         # least once — the popup can open clamped away from the cursor,
         # and closing before the user ever reaches it would be a misfire.
@@ -3754,13 +3967,19 @@ class DropdownPopup(QObject):
         if (item.get("type") == "image"
                 and self._target_class(target) in self._FILE_ONLY_TARGETS):
             item = {**item, "type": "file", "content": [item["content"]]}
-        # Close only the transient hover side panel, not the popup.
+        # Close only the transient hover side panel + Expand peek, not the popup.
         if self._side_panel:
             try:
                 self._side_panel.close()
             except Exception:
                 pass
             self._side_panel = None
+        if self._text_panel:
+            try:
+                self._text_panel.close()
+            except Exception:
+                pass
+            self._text_panel = None
 
         target = getattr(self, "_paste_target", None)
 
