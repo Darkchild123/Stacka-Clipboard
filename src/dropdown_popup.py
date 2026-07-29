@@ -2211,6 +2211,12 @@ class TextPeekPanel(QWidget):
         self._view = view
         lay.addWidget(view)
 
+        # Settle the window to its true size NOW, so _open_text_panel reads a
+        # correct width(). Without this the left-side flyout used Qt's default
+        # (too-large) width and drifted a gap away from the popup — the right
+        # side was unaffected because its x doesn't depend on the width.
+        self.adjustSize()
+
     # ── Close behaviour: hover-out (like the side panels) + Escape ────────────
     def arm_close_timer(self):
         self._close_timer.start(250)
