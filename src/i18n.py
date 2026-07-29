@@ -62,6 +62,12 @@ def tr(text: str) -> str:
 # _TRANSLATIONS[code][english] = translated.
 _TRANSLATIONS = {
     "fr": {
+        "chars":
+            "caractères",
+        "Full text":
+            "Texte complet",
+        "Expand":
+            "Développer",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "Remarque : l'entrée du menu contextuel de l'Explorateur Windows n'est pas disponible dans la version Microsoft Store. Utilisez l'un des déclencheurs ci-dessous — ils fonctionnent aussi dans l'Explorateur.",
         "Auto-wipe": "Effacement auto",
@@ -153,6 +159,12 @@ _TRANSLATIONS = {
         "Support Stacka's development": "Soutenir le développement de Stacka",
     },
     "es": {
+        "chars":
+            "caracteres",
+        "Full text":
+            "Texto completo",
+        "Expand":
+            "Ampliar",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "Nota: la entrada del menú contextual del Explorador de Windows no está disponible en la versión de Microsoft Store. Usa uno de los activadores de abajo: también funcionan en el Explorador.",
         "Auto-wipe": "Borrado auto",
@@ -236,6 +248,12 @@ _TRANSLATIONS = {
         "Support Stacka's development": "Apoya el desarrollo de Stacka",
     },
     "it": {
+        "chars":
+            "caratteri",
+        "Full text":
+            "Testo completo",
+        "Expand":
+            "Espandi",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "Nota: la voce del menu contestuale di Esplora file non è disponibile nella versione Microsoft Store. Usa uno degli attivatori qui sotto — funzionano anche in Esplora file.",
         "Auto-wipe": "Pulizia auto",
@@ -319,6 +337,12 @@ _TRANSLATIONS = {
         "Support Stacka's development": "Sostieni lo sviluppo di Stacka",
     },
     "ru": {
+        "chars":
+            "симв.",
+        "Full text":
+            "Полный текст",
+        "Expand":
+            "Развернуть",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "Примечание: пункт контекстного меню Проводника недоступен в версии из Microsoft Store. Используйте один из способов вызова ниже — все они работают и в Проводнике.",
         "Auto-wipe": "Автоочистка",
@@ -402,6 +426,12 @@ _TRANSLATIONS = {
         "Support Stacka's development": "Поддержать разработку Stacka",
     },
     "zh": {
+        "chars":
+            "字符",
+        "Full text":
+            "完整文本",
+        "Expand":
+            "展开",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "注意：Microsoft Store 版本不提供文件资源管理器右键菜单项。请使用下面的任一触发方式——它们在资源管理器中同样有效。",
         "Auto-wipe": "自动清除",
@@ -485,6 +515,12 @@ _TRANSLATIONS = {
         "Support Stacka's development": "支持 Stacka 的开发",
     },
     "ko": {
+        "chars":
+            "자",
+        "Full text":
+            "전체 텍스트",
+        "Expand":
+            "펼치기",
         "Note: the Windows Explorer right-click entry isn't available in the Microsoft Store version. Use one of the triggers below — they all work in Explorer too.":
             "참고: Microsoft Store 버전에서는 Windows 탐색기 우클릭 항목을 사용할 수 없습니다. 아래 트리거 중 하나를 사용하세요 — 탐색기에서도 모두 작동합니다.",
         "Auto-wipe": "자동 삭제",
