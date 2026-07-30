@@ -33,6 +33,7 @@ from PyQt6.QtCore    import Qt, QTimer, QPoint, pyqtSignal, QObject
 
 # ---- Windows API constants ----
 WH_MOUSE_LL    = 14
+WM_MOUSEMOVE   = 0x0200   # by far the most common hook event — see hook_proc
 WM_LBUTTONDOWN = 0x0201
 WM_RBUTTONDOWN = 0x0204
 WM_RBUTTONUP   = 0x0205
@@ -663,11 +664,21 @@ class ContextMenu:
         # Imported here (not at module top) purely for the hook's benefit
         from dropdown_popup import _DRAG_STATE
 
+        # Bound to locals: a closure lookup beats a global + attribute chain,
+        # and this is the hottest code in the process (see hook_proc).
+        _call_next = user32.CallNextHookEx
+
         def hook_proc(nCode, wParam, lParam):
             # ── HOT PATH ──  This runs for EVERY mouse event on the
             # system, including every mouse-move. Moves must bail on pure
             # int compares — per-move Python work adds system-wide cursor
             # latency (it once made drag-and-drop lag and stall OLE drops).
+            #
+            # Moves are ~99% of the traffic, so they leave on the FIRST
+            # comparison, before the nCode test and the _DRAG_STATE dict
+            # lookup that every event used to pay for.
+            if wParam == WM_MOUSEMOVE:
+                return _call_next(self.hook_id, nCode, wParam, lParam)
             if nCode >= 0 and not _DRAG_STATE["active"]:
                 if wParam == WM_LBUTTONDOWN:
                     try:

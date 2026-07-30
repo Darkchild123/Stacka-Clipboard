@@ -220,7 +220,7 @@ class ProfileManager:
     # ASSIGNING ITEMS TO PROFILES  (export a copy)
     # ============================================================
 
-    def add_item_to_profile(self, item, profile_id):
+    def add_item_to_profile(self, item, profile_id, save=True):
         """
         Export a COPY of `item` into a named profile. The copy is fully
         independent of General and of any other profile. Re-exporting an item
@@ -229,6 +229,10 @@ class ProfileManager:
 
         `item` is the full item dict (not just an id) so the profile can own
         a self-contained copy even after the original ages out of General.
+
+        save=False defers the write so sending N items to a profile persists
+        ONCE instead of N times (~4 ms each, on the UI thread). The caller
+        MUST call _save() itself afterwards.
         """
         if profile_id == GENERAL_ID:
             return
@@ -243,11 +247,15 @@ class ProfileManager:
             self._delete_item_image(existing, profile_id)
         items.insert(0, self._copy_item_for_profile(item, profile_id))
         self._enforce_profile_limit(profile)
-        self._save()
+        if save:
+            self._save()
 
 
-    def remove_item_from_profile(self, item_id, profile_id):
-        """Removes an item's copy from a specific profile (and its pin)."""
+    def remove_item_from_profile(self, item_id, profile_id, save=True):
+        """Removes an item's copy from a specific profile (and its pin).
+
+        save=False defers the write for batch removals — the caller MUST call
+        _save() afterwards."""
         profile = self._find(profile_id)
         if not profile:
             return
@@ -258,7 +266,8 @@ class ProfileManager:
         pinned = profile.get("pinned_item_ids", [])
         if item_id in pinned:
             pinned.remove(item_id)
-        self._save()
+        if save:
+            self._save()
 
 
     def clear_profile(self, profile_id, keep_pinned: bool = False):
