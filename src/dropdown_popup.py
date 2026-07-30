@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QMenu, QApplication, QSizePolicy,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect, QStyledItemDelegate,
     QMessageBox, QInputDialog, QPlainTextEdit,
+    QGraphicsScene, QGraphicsPathItem,
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QSize, QRect, QRectF, QPointF, QPropertyAnimation,
@@ -49,7 +50,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QPainter, QPen, QBrush, QFont, QFontMetrics,
     QPixmap, QImage, QCursor, QIcon, QPalette, QPolygonF, QDrag,
-    QTextOption,
+    QTextOption, QLinearGradient, QPainterPath,
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -183,6 +184,147 @@ def _grad_v(top: str, bottom: str) -> str:
     """QSS vertical linear gradient — the '3D surface' fill."""
     return (f"qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             f"stop:0 {top},stop:1 {bottom})")
+
+
+def _set_fg(widget, colour: str):
+    """Set a widget's text colour through its PALETTE instead of a stylesheet.
+
+    setStyleSheet re-parses the sheet and re-polishes the widget AND its
+    children on every call — ~0.08 ms each. Item rows were making eleven of
+    those per build (≈47% of the 1.6 ms it took to build one row) plus four
+    per hover-animation frame. A palette write costs a fraction of that and
+    produces identical pixels for a plain text colour. Both WindowText and
+    Text are set so it applies whichever role the widget draws with.
+    """
+    pal = widget.palette()
+    col = QColor(colour)
+    pal.setColor(QPalette.ColorRole.WindowText, col)
+    pal.setColor(QPalette.ColorRole.Text,       col)
+    widget.setPalette(pal)
+
+
+# ── Card elevation: a BAKED drop shadow ──────────────────────────────────────
+# Every Stacka window is a translucent frameless card floating inside
+# transparent margins, and the shadow is painted by Qt into those margins
+# (DWM does not shadow layered windows on Win10).
+#
+# It used to be a QGraphicsDropShadowEffect attached to the card. Two measured
+# problems with that:
+#
+#   1. A QGraphicsEffect re-rasterizes its ENTIRE source subtree whenever any
+#      descendant repaints — so one row's hover-animation frame re-rendered
+#      seven rows and re-blurred the whole popup.
+#   2. Qt does NOT cache a QWidget effect's result. Even with nothing inside it
+#      changing, the blur is recomputed on every paint of the containing
+#      window.
+#
+# Together those cost 9.06 ms of a 16.7 ms frame budget for a single hovered
+# row (versus 1.97 ms with no effect) — the single largest cause of hover
+# feeling like a dropped framerate.
+#
+# A drop shadow only depends on its source's SILHOUETTE, and the card's
+# silhouette is a fixed rounded rect. So the shadow is baked ONCE per window
+# size — through Qt's own QGraphicsDropShadowEffect, so the pixels are the same
+# blur as before — and then blitted. Blitting a prepared pixmap is effectively
+# free, and it no longer matters what repaints inside the card.
+
+# Deliberately small: each entry is a full window-sized ARGB pixmap (~1 MB for
+# the default popup), and a drag-resize walks through a new size every pixel.
+# Steady state needs exactly one entry per visible window.
+_SHADOW_CACHE: dict = {}   # (w, h, margins, bg, radius, blur, dy, alpha) → QPixmap
+_SHADOW_CACHE_MAX = 4
+
+
+def _shadow_pixmap(win_w: int, win_h: int, margins, bg: str, radius: int,
+                   blur: int, dy: int, alpha: int):
+    """The card silhouette plus its drop shadow, as one window-sized pixmap.
+
+    Rendered offscreen through Qt's real QGraphicsDropShadowEffect, at the
+    card's ACTUAL size, so the output is pixel-identical to attaching the
+    effect to the card — just computed once per size instead of once per frame.
+
+    Baking at the real size matters: Qt's blur internally downscales the source
+    for speed, so its result depends on the source's dimensions. A single
+    reference tile stretched to fit (nine-slicing, which is otherwise exact for
+    a rounded rect) drifted a few alpha steps from the live effect near the
+    corners at some sizes. Baking per size keeps it exact; the cost is only
+    paid when a window is created or dragged to a new size.
+    """
+    key = (win_w, win_h, tuple(margins), bg, radius, blur, dy, alpha)
+    pm  = _SHADOW_CACHE.get(key)
+    if pm is not None:
+        return pm
+
+    ml, mt, mr, mb = margins
+    cw = max(1, win_w - ml - mr)
+    ch = max(1, win_h - mt - mb)
+
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(0.0, 0.0, float(cw), float(ch)),
+                        float(radius), float(radius))
+    item = QGraphicsPathItem(path)
+    item.setBrush(QBrush(QColor(bg)))
+    item.setPen(QPen(Qt.PenStyle.NoPen))
+    eff = QGraphicsDropShadowEffect()
+    eff.setBlurRadius(blur)
+    eff.setOffset(0, dy)
+    eff.setColor(QColor(0, 0, 0, alpha))
+    item.setGraphicsEffect(eff)
+
+    scene = QGraphicsScene()
+    scene.addItem(item)
+
+    pm = QPixmap(win_w, win_h)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Source offset by the margins so the shadow spilling OUTSIDE the card
+    # lands in them instead of being clipped away.
+    scene.render(p,
+                 QRectF(0.0, 0.0, float(win_w), float(win_h)),
+                 QRectF(float(-ml), float(-mt), float(win_w), float(win_h)))
+    p.end()
+    scene.clear()
+
+    if len(_SHADOW_CACHE) >= _SHADOW_CACHE_MAX:
+        _SHADOW_CACHE.clear()
+    _SHADOW_CACHE[key] = pm
+    return pm
+
+
+def _set_card_shadow(win, margins, bg: str, radius: int, blur: int,
+                     dy: int, alpha: int = 150):
+    """Declare a window's card shadow. Its paintEvent must call
+    _paint_card_shadow.
+
+    INVARIANT (unchanged): blur + |dy| must fit inside `margins`, or Windows
+    rejects the layered-window update and the window freezes on stale content.
+    """
+    win._shadow_spec = (tuple(margins), bg, radius, blur, dy, alpha)
+
+
+def _paint_card_shadow(win, painter):
+    """Blit the baked shadow for this window's current size."""
+    spec = getattr(win, "_shadow_spec", None)
+    if spec is None:
+        return
+    margins, bg, radius, blur, dy, alpha = spec
+    try:
+        pm = _shadow_pixmap(win.width(), win.height(), margins, bg,
+                            radius, blur, dy, alpha)
+    except Exception:
+        return          # never let a decoration failure break a repaint
+    painter.drawPixmap(0, 0, pm)
+
+
+def _set_solid_bg(widget, colour: str):
+    """Fill a widget with a flat colour via its palette (no stylesheet).
+    Used for the row's left type strip, whose colour changes on select and
+    whose width animates on hover."""
+    widget.setAutoFillBackground(True)
+    pal = widget.palette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(colour))
+    widget.setPalette(pal)
 
 def _scrollbar_qss(C: dict) -> str:
     """Shared modern scrollbar: transparent track, rounded gradient handle
@@ -669,6 +811,124 @@ def _mime_for_items(items: list) -> QMimeData:
     return md
 
 
+# ── Filesystem caches ────────────────────────────────────────────────────────
+# Row building and side-panel populating ask the same questions about the same
+# paths over and over — once per row, on EVERY list rebuild (a pin click, a
+# delete, a search keystroke, a profile switch). Those answers were re-fetched
+# from disk each time, on the UI thread:
+#
+#   os.listdir + a per-child os.path.isdir on C:\Windows\System32  →  253 ms
+#   the folder count for one folder row                            →   8.8 ms
+#
+# With a few folder clips in the list that is most of a second of frozen UI per
+# keystroke. Both caches are validated cheaply rather than trusted blindly.
+
+_DIR_CACHE: dict = {}      # normcase(folder) → (mtime_ns, cached_at, entries)
+_ISDIR_CACHE: dict = {}    # path → (expires_at, bool)
+
+_FS_TTL = 2.0              # seconds a cached filesystem answer may be reused
+
+
+def _dir_entries(folder: str):
+    """(path, is_dir) pairs for a folder's children — cached, briefly.
+
+    os.scandir reads is_dir() straight from the directory entry, so there is
+    no extra stat per child; that per-child stat was most of the 253 ms this
+    used to cost on a large folder.
+
+    A hit must satisfy BOTH guards:
+      * the folder's own mtime_ns is unchanged, and
+      * the entry is younger than _FS_TTL.
+
+    The TTL is not belt-and-braces, it is load-bearing. Windows directory
+    timestamps advance with the ~15 ms system clock tick, so two changes to a
+    folder inside one tick share an mtime — if we cached between them, an
+    mtime-only check would serve a stale listing until some LATER change
+    happened to bump it again. The TTL bounds any staleness to two seconds
+    while still collapsing what this is actually for: the same folder being
+    listed many times inside one burst of UI work (every row of a rebuild,
+    every row of a side panel, a run of search keystrokes).
+
+    Raises OSError like os.listdir did, so callers that already guard for a
+    vanished folder keep working unchanged.
+    """
+    st  = os.stat(folder)          # OSError propagates — callers expect it
+    key = os.path.normcase(folder)
+    hit = _DIR_CACHE.get(key)
+    now = time.monotonic()
+    if (hit is not None and hit[0] == st.st_mtime_ns
+            and now - hit[1] < _FS_TTL):
+        return hit[2]
+    out = []
+    with os.scandir(folder) as it:
+        for e in it:
+            try:
+                out.append((e.path, e.is_dir()))
+            except OSError:
+                out.append((e.path, False))
+    if len(_DIR_CACHE) >= 64:
+        _DIR_CACHE.clear()
+    _DIR_CACHE[key] = (st.st_mtime_ns, now, out)
+    return out
+
+
+def _is_dir(path: str) -> bool:
+    """os.path.isdir with a 2-second memo.
+
+    Every row build asks this about the same clip paths, and a side panel asks
+    it once per row — for a 247-file panel that is 247 blocking stats, each a
+    network round-trip when the clip points at a share. The short TTL keeps it
+    honest: a folder that appears or disappears is picked up within 2 s.
+    """
+    now = time.monotonic()
+    hit = _ISDIR_CACHE.get(path)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    try:
+        v = os.path.isdir(path)
+    except OSError:
+        v = False
+    if len(_ISDIR_CACHE) > 4096:
+        _ISDIR_CACHE.clear()
+    _ISDIR_CACHE[path] = (now + _FS_TTL, v)
+    return v
+
+
+_THUMB_CACHE: dict = {}    # (normcase(path), mtime_ns, size) → QPixmap
+
+
+def _thumb_pixmap(path, size: int):
+    """Cached row thumbnail for an image clip, or None if it can't be read.
+
+    Decoding a saved screenshot with PIL costs ~9 ms at 1080p and ~27 ms at
+    4K, and the row list is rebuilt on every pin / delete / move / search
+    keystroke — so that decode was paid again and again for a picture that
+    never changed. Keyed by mtime_ns so an edited file still refreshes.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.normcase(str(path)), st.st_mtime_ns, size)
+    pm  = _THUMB_CACHE.get(key)
+    if pm is not None:
+        return pm
+    try:
+        img = Image.open(path)
+        img.thumbnail((size, size))
+        img  = img.convert("RGBA")
+        data = img.tobytes("raw", "RGBA")
+        qimg = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+        # fromImage COPIES, so the pixmap outlives `data` safely.
+        pm = QPixmap.fromImage(qimg)
+    except Exception:
+        return None
+    if len(_THUMB_CACHE) > 128:
+        _THUMB_CACHE.clear()
+    _THUMB_CACHE[key] = pm
+    return pm
+
+
 def _content_count(item: dict):
     """How many things are 'inside' a file item, or None if not applicable.
 
@@ -683,13 +943,16 @@ def _content_count(item: dict):
         return None
     if len(content) > 1:
         return len(content)
-    if os.path.isdir(content[0]):
+    if _is_dir(content[0]):
         try:
             # Must exclude paths the user hid via "Remove from list", or the
             # badge keeps showing the original count after a removal.
             hidden = item.get("hidden_files") or []
-            kids = [os.path.join(content[0], n) for n in os.listdir(content[0])]
-            return len([k for k in kids if k not in hidden]) if hidden else len(kids)
+            kids = [p for p, _ in _dir_entries(content[0])]
+            if hidden:
+                hs = set(hidden)
+                return len([k for k in kids if k not in hs])
+            return len(kids)
         except OSError:
             return None
     return None
@@ -855,6 +1118,11 @@ class ItemRowWidget(QWidget):
         self.history  = history
         self.profiles = profiles
         self.C        = colours
+        # Row fill, read by paintEvent. Kept as state instead of being pushed
+        # through setStyleSheet — see _sync_paint.
+        self._fill_col  = QColor(colours["bg_item"])
+        self._grad_cols = None      # (top, mid, bottom) while hovered
+        self._prev_fg   = None      # last preview-label colour applied
         # Eased hover animation, tuned to keep up with the cursor.
         #
         # This was 250 ms of OutExpo, which spends most of its time in a long
@@ -910,7 +1178,7 @@ class ItemRowWidget(QWidget):
         self._type_col = type_col          # strip colour when NOT selected
         self._strip = QFrame(self)
         self._strip.setFixedWidth(3)
-        self._strip.setStyleSheet(f"background:{type_col};border:none;")
+        _set_solid_bg(self._strip, type_col)   # palette fill, not a stylesheet
         main.addWidget(self._strip)
 
         # Thumbnail
@@ -937,7 +1205,7 @@ class ItemRowWidget(QWidget):
         _prev_font = QFont("Segoe UI", max(6, int(10 * _FONT_SCALE)))
         _src_font  = QFont("Segoe UI", max(6, int(8 * _FONT_SCALE)))
         self._preview_lbl.setFont(_prev_font)
-        self._preview_lbl.setStyleSheet(f"color:{C['text_preview']};background:transparent;")
+        _set_fg(self._preview_lbl, C["text_preview"])
         # Show only WHOLE lines. A wrapped QLabel vertically CENTRES its text,
         # so when a clip was taller than the row it was cropped top AND bottom
         # — slicing characters in half and making them unreadable. Pin the
@@ -956,7 +1224,7 @@ class ItemRowWidget(QWidget):
         src = item.get("source","Unknown")
         self._source_lbl = QLabel(f"From: {src}", self)
         self._source_lbl.setFont(_src_font)
-        self._source_lbl.setStyleSheet(f"color:{C['text_dim']};background:transparent;")
+        _set_fg(self._source_lbl, C["text_dim"])
         # A long "From: C:\...\path" has no wordwrap, so its full text width
         # would force the whole ROW wider than the window — clipping the text
         # and pushing the action buttons off the right edge. Ignored width
@@ -1017,7 +1285,7 @@ class ItemRowWidget(QWidget):
         btn_col.addLayout(row2)
         main.addLayout(btn_col)
 
-        self._apply_bg(self._base_bg)
+        self._sync_paint(0.0)
         self.setMouseTracking(True)
 
     def _load_thumb(self, label: QLabel, item: dict):
@@ -1029,15 +1297,13 @@ class ItemRowWidget(QWidget):
                                          colour_hint=str(item.get("content","")).strip()))
             return
         if itype == "image":
-            try:
-                img = Image.open(item["content"])
-                img.thumbnail((THUMB_SIZE, THUMB_SIZE))
-                data = img.convert("RGBA").tobytes("raw","RGBA")
-                qimg = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
-                label.setPixmap(QPixmap.fromImage(qimg))
+            # Cached by (path, mtime, size) — the raw PIL decode is 9 ms for a
+            # 1080p grab and 27 ms for a 4K one, and it used to be re-done on
+            # every list rebuild for an image that never changed.
+            pm = _thumb_pixmap(item["content"], THUMB_SIZE)
+            if pm is not None:
+                label.setPixmap(pm)
                 return
-            except Exception:
-                pass
         # Determine icon type for files
         ext = None
         if itype == "file":
@@ -1048,7 +1314,7 @@ class ItemRowWidget(QWidget):
                 if len(files) > 1:
                     icon_type = "file"   # multi-file entry: generic icon
                     ext = None
-                elif os.path.isdir(files[0]):
+                elif _is_dir(files[0]):
                     icon_type = "folder"
                     ext = None
             else:
@@ -1059,13 +1325,60 @@ class ItemRowWidget(QWidget):
 
     # ── Background ───────────────────────────────────────────────────────────
 
-    def _apply_bg(self, bg_css: str, extra: str = ""):
-        # No box border — selection is shown by the accent LEFT STRIP + tint.
-        # (A border set here bled onto the child labels, boxing the text.)
-        self.setStyleSheet(f"background:{bg_css};border:none;{extra}")
-        # Keep labels transparent so row bg shows through
-        for lbl in [self._preview_lbl, self._source_lbl, self._thumb]:
-            lbl.setStyleSheet(lbl.styleSheet().split(";")[0] + ";background:transparent;")
+    def _sync_paint(self, t: float):
+        """Recompute the row's fill for hover progress `t`, then repaint.
+
+        All of this used to go through setStyleSheet — the row's own sheet plus
+        three child sheets, on EVERY animation frame. That cost 0.9 ms per
+        frame per animating row (2.2 ms once the parent list re-laid itself
+        out), and two rows animate whenever the cursor moves between them, so
+        simply running the mouse down the list ate a large slice of the 16.7 ms
+        frame budget. The fill is now plain state that paintEvent reads, so a
+        frame is one repaint of the row's own rect and no CSS is parsed.
+
+        No box border — selection is shown by the accent LEFT STRIP + tint.
+        (A border here bled onto the child labels, boxing the text.)
+        """
+        hovcol = _hex_lerp(self._base_bg, self._hover_target(), t)
+        if t > 0.04:
+            # Convex "bulge": a vertical gradient, lighter at the top and
+            # darker at the base, reads as a mildly raised surface. Pure
+            # gradient — no border, so it never shifts the row layout.
+            self._grad_cols = (QColor(_shade(hovcol,  0.16 * t)),
+                               QColor(hovcol),
+                               QColor(_shade(hovcol, -0.14 * t)))
+        else:
+            self._grad_cols = None
+        self._fill_col = QColor(hovcol)
+
+        base_w = 5 if self._selected else 3   # selected rows keep a bolder strip
+        w = max(base_w, int(base_w + 7 * t))
+        if w != self._strip.width():
+            # Only on a real change: this invalidates the parent list's layout,
+            # and re-running it for an identical width was pure waste.
+            self._strip.setFixedWidth(w)
+
+        fg = _hex_lerp(self.C["text_preview"], self.C["text"], t)
+        if fg != self._prev_fg:
+            self._prev_fg = fg
+            _set_fg(self._preview_lbl, fg)
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        r = self.rect()
+        g = self._grad_cols
+        if g is None:
+            p.fillRect(r, self._fill_col)
+        else:
+            # Spans 0 → height, matching QSS's y1:0 / y2:1 bounding-box mapping
+            # exactly, so the gradient is pixel-identical to the old stylesheet.
+            lg = QLinearGradient(0.0, 0.0, 0.0, float(r.height()))
+            lg.setColorAt(0.0, g[0])
+            lg.setColorAt(0.5, g[1])
+            lg.setColorAt(1.0, g[2])
+            p.fillRect(r, QBrush(lg))
+        p.end()
 
     def _hover_target(self) -> str:
         return _HOVER_COLOUR or self.C["bg_hover"]
@@ -1079,9 +1392,9 @@ class ItemRowWidget(QWidget):
         # The left strip turns solid accent while selected (its normal type
         # colour otherwise) — a clean marker instead of a box around the text.
         strip_col = self.C["accent"] if selected else self._type_col
-        self._strip.setStyleSheet(f"background:{strip_col};border:none;")
+        _set_solid_bg(self._strip, strip_col)
         # Repaint at the current hover state
-        self._on_anim_value(self._anim_t)
+        self._sync_paint(self._anim_t)
 
     # ── Hover animation ──────────────────────────────────────────────────────
 
@@ -1098,25 +1411,10 @@ class ItemRowWidget(QWidget):
         self._anim.start()
 
     def _on_anim_value(self, v):
-        t = self._anim_t = float(v)
-        # Cheap stylesheet updates only — no graphics effects (a blur effect
+        # Painted, not styled — no graphics effects either (a blur effect
         # re-rasterizes the row every frame and janks the animation).
-        hovcol = _hex_lerp(self._base_bg, self._hover_target(), t)
-        if t > 0.04:
-            # Convex "bulge": a vertical gradient, lighter at the top and
-            # darker at the base, reads as a mildly raised surface. Pure
-            # gradient — no border, so it never shifts the row layout.
-            top = _shade(hovcol, 0.16 * t)
-            bot = _shade(hovcol, -0.14 * t)
-            bg = (f"qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                  f"stop:0 {top},stop:0.5 {hovcol},stop:1 {bot})")
-        else:
-            bg = hovcol
-        self._apply_bg(bg)
-        base_w = 5 if self._selected else 3   # selected rows keep a bolder strip
-        self._strip.setFixedWidth(max(base_w, int(base_w + 7 * t)))
-        tc = _hex_lerp(self.C["text_preview"], self.C["text"], t)
-        self._preview_lbl.setStyleSheet(f"color:{tc};background:transparent;")
+        self._anim_t = float(v)
+        self._sync_paint(self._anim_t)
 
     def enterEvent(self, event):
         self._enter_hover()
@@ -1191,6 +1489,9 @@ class ItemRowWidget(QWidget):
             pass
 
 
+_PIN_CACHE: dict = {}   # (colour, filled, px) → QPixmap
+
+
 def _pin_pixmap(colour: str, filled: bool, px: int = 16) -> QPixmap:
     """Draw a classic 📌-style pushpin (angled, ball head + collar + needle).
 
@@ -1198,7 +1499,14 @@ def _pin_pixmap(colour: str, filled: bool, px: int = 16) -> QPixmap:
     `color:` property is ignored, so its colour can't reflect pin state.
     Drawing the same shape ourselves makes the colour real: transparent
     with a coloured border when unpinned, solid fill when pinned.
+
+    Cached: there are only a handful of distinct pins, but one was drawn from
+    scratch for every row on every rebuild (0.064 ms each).
     """
+    key = (colour, bool(filled), px)
+    hit = _PIN_CACHE.get(key)
+    if hit is not None:
+        return hit
     pm = QPixmap(px, px)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -1221,13 +1529,24 @@ def _pin_pixmap(colour: str, filled: bool, px: int = 16) -> QPixmap:
     ]))
     p.drawLine(QPointF(0, 1.4*s), QPointF(0, 7.2*s))           # needle
     p.end()
+    _PIN_CACHE[key] = pm
     return pm
 
 
 class _ActionButton(QLabel):
     """Small clickable label used for pin/delete/move buttons.
-    Blocks mouse events from propagating to the row below."""
+    Blocks mouse events from propagating to the row below.
+
+    The rounded chip behind the glyph is PAINTED rather than set through a
+    stylesheet. Four of these are built per row, and each setStyleSheet call
+    re-parses the sheet and re-polishes the widget (~0.08 ms) — so the old
+    version spent a third of a millisecond per row on styling alone, plus two
+    more calls every time the cursor crossed a button. The text colour comes
+    from the palette, which QLabel already honours.
+    """
     clicked_signal = pyqtSignal()
+
+    RADIUS = 4
 
     def __init__(self, text: str, colour: str, C: dict, parent=None):
         super().__init__(text, parent)
@@ -1237,16 +1556,28 @@ class _ActionButton(QLabel):
         self.setFixedSize(24, 24)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._idle_style  = f"color:{colour};background:{C['bg_item']};border-radius:4px;"
-        self._hover_style = f"color:{colour};background:{C['bg_hover']};border-radius:4px;"
-        self.setStyleSheet(self._idle_style)
+        _set_fg(self, colour)
+        self._idle_bg  = QColor(C["bg_item"])
+        self._hover_bg = QColor(C["bg_hover"])
+        self._hovered  = False
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._hover_bg if self._hovered else self._idle_bg)
+        p.drawRoundedRect(QRectF(self.rect()), self.RADIUS, self.RADIUS)
+        p.end()
+        super().paintEvent(e)   # glyph / pin pixmap on top
 
     def enterEvent(self, e):
-        self.setStyleSheet(self._hover_style)
+        self._hovered = True
+        self.update()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.setStyleSheet(self._idle_style)
+        self._hovered = False
+        self.update()
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
@@ -1300,24 +1631,28 @@ class ToastWidget(QWidget):
         self.setWindowOpacity(0.85)
         self.show()
 
-        self._alpha = 0.85
-        self._fade_timer = QTimer(self)
-        self._fade_timer.timeout.connect(self._fade_step)
         # Fade takes ~250 ms — start early enough that the toast is GONE
-        # by `duration`, which is itself capped at 1 s.
+        # by `duration`, which is itself capped at 1.5 s.
+        #
+        # This was a 40 ms QTimer stepping opacity by 0.14, i.e. six visible
+        # jumps — a stutter, on the one animation the user sees on every
+        # paste. QPropertyAnimation is driven by Qt's unified animation timer,
+        # so it runs at the display's frame rate and is smooth. Same colours,
+        # same 250 ms, same end state.
         duration = min(duration, self.MAX_MS)
+        self._fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self._fade.setDuration(250)
+        self._fade.setStartValue(0.85)
+        self._fade.setEndValue(0.0)
+        self._fade.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._fade.finished.connect(self.close)   # WA_DeleteOnClose → destroyed
         QTimer.singleShot(max(0, duration - 250), self._start_fade)
 
     def _start_fade(self):
-        self._fade_timer.start(40)
-
-    def _fade_step(self):
-        self._alpha -= 0.14
-        if self._alpha <= 0:
-            self._fade_timer.stop()
-            self.close()   # WA_DeleteOnClose → destroyed signal fires
-        else:
-            self.setWindowOpacity(self._alpha)
+        try:
+            self._fade.start()
+        except RuntimeError:
+            pass          # already closed
 
 
 # ── Side panel (multi-file list) ──────────────────────────────────────────────
@@ -1416,11 +1751,11 @@ class SidePanelWidget(QWidget):
         card.setStyleSheet(
             f"QWidget#panel_card {{background:{colours['bg']};"
             f"border:1px solid {colours['border']};border-radius:8px;}}")
-        _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(11)     # 11 + offset 2 < margins (14/10/17)
-        _shadow.setOffset(0, 2)
-        _shadow.setColor(QColor(0, 0, 0, 140))
-        card.setGraphicsEffect(_shadow)
+        # Baked shadow (see _set_card_shadow) — a live effect on the card
+        # re-blurred the whole panel every time a row repainted on hover.
+        # (11 + offset 2 < margins 14/10/17.)
+        _set_card_shadow(self, (14, 10, 14, 17), colours['bg'],
+                         radius=8, blur=11, dy=2, alpha=140)
         outer.addWidget(card)
 
         lay = QVBoxLayout(card)
@@ -1642,6 +1977,12 @@ class SidePanelWidget(QWidget):
         self.arm_close_timer()
         super().leaveEvent(e)
 
+    def paintEvent(self, e):
+        p = QPainter(self)
+        _paint_card_shadow(self, p)
+        p.end()          # explicit — don't rely on the temporary's lifetime
+        super().paintEvent(e)
+
     def closeEvent(self, e):
         # The parent row is highlighted for as long as ITS panel lives, so
         # release that highlight here. Only the top-level panel owns the row —
@@ -1689,7 +2030,7 @@ class SidePanelWidget(QWidget):
         if self._parent_panel is not None:
             return
         fp = qi.data(Qt.ItemDataRole.UserRole)
-        if fp and os.path.isdir(fp):
+        if fp and _is_dir(fp):
             self._open_sub_panel(qi, fp)
         elif self._sub_panel:
             # Hovered a non-folder row — let the open child wind down
@@ -1730,10 +2071,12 @@ class SidePanelWidget(QWidget):
             self._sub_panel = None
 
         try:
-            names = sorted(os.listdir(folder))
+            # Same name order as the old sorted(os.listdir(...)), but through
+            # the mtime-validated cache so re-hovering a folder is instant.
+            files = sorted((p for p, _ in _dir_entries(folder)),
+                           key=os.path.basename)
         except OSError:
             return   # unreadable / vanished folder — nothing to reveal
-        files = [os.path.join(folder, n) for n in names]
         # Drop rows the user hid via "Remove from list" (persisted per-entry,
         # never deleted from disk) so they stay gone when the folder reopens.
         hidden = self.item.get("hidden_files") or []
@@ -1898,7 +2241,8 @@ class SidePanelWidget(QWidget):
             return
         pid = ctrl.profiles.create_profile(name.strip())
         for fp in reversed(list(fps)):
-            self._send_one_file_to_profile(fp, pid)
+            self._send_one_file_to_profile(fp, pid, save=False)
+        self._flush_file_target(pid)             # one write for the batch
         ctrl._show_toast(f'Created "{name.strip()}" · added {len(fps)} file(s)')
         self._list.clearSelection()
         self._sel_at_press = []
@@ -1920,7 +2264,14 @@ class SidePanelWidget(QWidget):
         for fp in pinned + normal:
             basename = os.path.basename(fp)
             ext      = os.path.splitext(fp)[1].lower()
-            itype    = _FILE_TYPE_MAP.get(ext, "folder" if os.path.isdir(fp) else "file")
+            # Only stat when the extension doesn't already identify the row.
+            # This was `_FILE_TYPE_MAP.get(ext, "folder" if os.path.isdir(fp)
+            # else "file")` — and Python evaluates that default EAGERLY, so a
+            # 247-file panel did 247 blocking stats even when every extension
+            # was already known.
+            itype = _FILE_TYPE_MAP.get(ext)
+            if itype is None:
+                itype = "folder" if _is_dir(fp) else "file"
             qi       = QListWidgetItem(f"  {basename}")
             qi.setData(Qt.ItemDataRole.UserRole, fp)
             qi.setData(_PIN_ROLE, fp in pinned)
@@ -1935,11 +2286,18 @@ class SidePanelWidget(QWidget):
     def _folder_count(self, fp: str):
         """How many files a folder row represents, EXCLUDING any hidden with
         "Remove from list". A raw os.listdir() here was why a folder still
-        read 4 after one of its four files was removed."""
+        read 4 after one of its four files was removed.
+
+        Goes through the mtime-validated _dir_entries cache — this is called
+        once per folder row, and again for every row by _refresh_counts.
+        """
         try:
             hidden = self.item.get("hidden_files") or []
-            kids = [os.path.join(fp, n) for n in os.listdir(fp)]
-            return len([k for k in kids if k not in hidden]) if hidden else len(kids)
+            kids = [p for p, _ in _dir_entries(fp)]
+            if hidden:
+                hs = set(hidden)
+                return len([k for k in kids if k not in hs])
+            return len(kids)
         except OSError:
             return None      # unreadable folder — no count shown
 
@@ -1951,7 +2309,7 @@ class SidePanelWidget(QWidget):
             for i in range(self._list.count()):
                 qi = self._list.item(i)
                 fp = qi.data(Qt.ItemDataRole.UserRole)
-                if fp and os.path.isdir(fp):
+                if fp and _is_dir(fp):
                     cnt = self._folder_count(fp)
                     if cnt is not None:
                         qi.setData(_COUNT_ROLE, cnt)
@@ -1991,11 +2349,15 @@ class SidePanelWidget(QWidget):
             return []
         return ctrl.profiles.get_all_profiles()
 
-    def _send_one_file_to_profile(self, fp: str, profile_id: str):
+    def _send_one_file_to_profile(self, fp: str, profile_id: str,
+                                  save: bool = True):
         """Send ONE file to a profile, no toast/refresh (batch-friendly). A
         side-panel file becomes its own file entry (id = md5 of the path): a
         named profile gets an INDEPENDENT COPY (export model); General gets its
-        own visible history entry."""
+        own visible history entry.
+
+        save=False defers the disk write so sending a whole multi-selection
+        persists once instead of once per file."""
         ctrl  = self.controller
         hist  = ctrl.history
         fid   = hashlib.md5(fp.encode()).hexdigest()
@@ -2013,9 +2375,18 @@ class SidePanelWidget(QWidget):
                 hist._enforce_limit()      # keep General within its limit
             else:
                 existing.pop("hidden", None)   # un-hide an existing entry
-            hist._save_history()
+            if save:
+                hist._save_history()
         else:
-            ctrl.profiles.add_item_to_profile(entry, profile_id)
+            ctrl.profiles.add_item_to_profile(entry, profile_id, save=save)
+
+    def _flush_file_target(self, profile_id: str):
+        """Persist the store a deferred _send_one_file_to_profile batch wrote."""
+        ctrl = self.controller
+        if profile_id == "general":
+            ctrl.history._save_history()
+        else:
+            ctrl.profiles._save()
 
     def _send_files_to_profile(self, fps, profile_id: str, profile_name: str):
         """Send one or more selected files to a profile — one toast + one
@@ -2025,7 +2396,8 @@ class SidePanelWidget(QWidget):
         if ctrl is None or not fps:
             return
         for fp in reversed(list(fps)):
-            self._send_one_file_to_profile(fp, profile_id)
+            self._send_one_file_to_profile(fp, profile_id, save=False)
+        self._flush_file_target(profile_id)      # one write for the batch
         if len(fps) == 1:
             ctrl._show_toast(f'Sent "{os.path.basename(fps[0])}" to "{profile_name}"')
         else:
@@ -2053,8 +2425,11 @@ class SidePanelWidget(QWidget):
             idx = self._row_of(fp)
             pf = self.item.get("pinned_files", [])
             if fp in pf:
-                pf.remove(fp)   # persisted by remove_file_from_item's save
-            still_exists = ctrl.history.remove_file_from_item(self.item["id"], fp)
+                pf.remove(fp)   # persisted by the flush below
+            # save=False: one encrypt+fsync for the whole selection instead of
+            # one per file (~4 ms each — 20 files was ~80 ms of frozen UI).
+            still_exists = ctrl.history.remove_file_from_item(
+                self.item["id"], fp, save=False)
             if fp in self.files:
                 self.files.remove(fp)
             if idx >= 0:
@@ -2062,6 +2437,7 @@ class SidePanelWidget(QWidget):
             if not still_exists or not self.files:
                 gone = True
                 break   # whole entry gone — nothing left to show
+        ctrl.history._save_history()       # flush the batch (every path above)
         self._hdr.setText(self._hdr_text())
         self._refresh_counts()             # own folder rows
         self._refresh_ancestor_counts()    # and the row that opened this panel
@@ -2159,11 +2535,10 @@ class TextPeekPanel(QWidget):
         card.setStyleSheet(
             f"QWidget#peek_card {{background:{colours['bg']};"
             f"border:1px solid {colours['border']};border-radius:8px;}}")
-        _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(11)
-        _shadow.setOffset(0, 2)
-        _shadow.setColor(QColor(0, 0, 0, 140))
-        card.setGraphicsEffect(_shadow)
+        # Baked shadow (see _set_card_shadow) — scrolling this panel's text
+        # must not re-blur the whole flyout.
+        _set_card_shadow(self, (14, 10, 14, 17), colours['bg'],
+                         radius=8, blur=11, dy=2, alpha=140)
         outer.addWidget(card)
 
         lay = QVBoxLayout(card)
@@ -2240,6 +2615,12 @@ class TextPeekPanel(QWidget):
     def leaveEvent(self, e):
         self.arm_close_timer()
         super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        _paint_card_shadow(self, p)
+        p.end()          # explicit — don't rely on the temporary's lifetime
+        super().paintEvent(e)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
@@ -2354,6 +2735,12 @@ class _PopupWindow(QWidget):
         if not self._edges:
             self.unsetCursor()
         super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        _paint_card_shadow(self, p)
+        p.end()          # explicit — don't rely on the temporary's lifetime
+        super().paintEvent(e)
 
 
 class _PopupSignals(QObject):
@@ -2627,6 +3014,7 @@ class DropdownPopup(QObject):
         self._open_workers = set() # live _OpenWorker threads (GC guard)
         self._hover_timer = None   # cursor poll for hover-to-close mode
         self._hover_seen_inside = False
+        self._search_timer = None  # keystroke debounce for the search box
         self._selected_ids = set() # Ctrl+click multi-selection (item ids)
         self._colours     = DARK   # Current theme dict
 
@@ -2725,11 +3113,12 @@ class DropdownPopup(QObject):
         card.setStyleSheet(
             f"QWidget#stacka_card {{background:{C['bg']};"
             f"border:1px solid {C['border']};border-radius:10px;}}")
-        _shadow = QGraphicsDropShadowEffect(card)
-        _shadow.setBlurRadius(15)     # 15 + offset 3 < margins (18/14/22)
-        _shadow.setOffset(0, 3)
-        _shadow.setColor(QColor(0, 0, 0, 150))
-        card.setGraphicsEffect(_shadow)
+        # Shadow baked once per window size and blitted by _PopupWindow's
+        # paintEvent, NOT a live effect on the card — a live effect re-blurred
+        # the whole popup on every row repaint. See _set_card_shadow.
+        # (15 + offset 3 < margins 18/14/22.)
+        _set_card_shadow(popup, (18, 14, 18, 22), C['bg'],
+                         radius=10, blur=15, dy=3, alpha=150)
         outer.addWidget(card)
 
         main_lay = QVBoxLayout(card)
@@ -2759,7 +3148,17 @@ class DropdownPopup(QObject):
         self._list_container = QWidget(popup)
         # Explicit dark background — the card's stylesheet is selector-
         # scoped and no longer cascades here (was the white-rows bug).
-        self._list_container.setStyleSheet(f"background:{C['bg']};")
+        #
+        # SCOPED to this widget by object name, and it must stay that way. An
+        # unscoped "background:X" here cascaded into every descendant, so each
+        # row's labels, type strip and buttons painted the container's colour
+        # on top of the row — which is why they each needed their own
+        # "background:transparent" stylesheet, four of which were being
+        # re-applied on every hover-animation frame. Rows paint themselves now
+        # (ItemRowWidget.paintEvent); the scope is what lets them.
+        self._list_container.setObjectName("stacka_list")
+        self._list_container.setStyleSheet(
+            f"QWidget#stacka_list{{background:{C['bg']};}}")
         self._list_lay     = QVBoxLayout(self._list_container)
         self._list_lay.setContentsMargins(0,0,0,0)
         self._list_lay.setSpacing(0)
@@ -2812,8 +3211,8 @@ class DropdownPopup(QObject):
         fl.addWidget(support)
         main_lay.addWidget(footer)
 
-        # Connect search
-        self._search_edit.textChanged.connect(self._on_search)
+        # Connect search — debounced, see _on_search_typed
+        self._search_edit.textChanged.connect(self._on_search_typed)
 
         # Size the WINDOW to the persisted (drag-controlled) size, clamped so
         # it never exceeds the work area, then position at the cursor.
@@ -3008,16 +3407,14 @@ class DropdownPopup(QObject):
             files = item.get("content", [])
             is_multi = (item.get("type") == "file" and isinstance(files, list) and len(files) > 1)
             is_folder = (item.get("type") == "file" and isinstance(files, list) and
-                         len(files) == 1 and os.path.isdir(files[0]))
+                         len(files) == 1 and _is_dir(files[0]))
             if is_multi or is_folder:
-                if is_folder:
-                    try:
-                        panel_files = self._folder_panel_files(
-                            files[0], item.get("hidden_files"))
-                    except Exception:
-                        panel_files = files
-                else:
-                    panel_files = files
+                # A folder row's contents are listed WHEN ITS PANEL OPENS, not
+                # while building the row. Listing a big folder is the single
+                # most expensive thing a row build could do, and it ran for
+                # every folder row on every rebuild — to fill a flyout the user
+                # may never hover. None here means "resolve on hover".
+                panel_files = None if is_folder else files
                 row.enterEvent = self._make_panel_enter(row, item, panel_files, row.enterEvent)
                 row.leaveEvent = self._make_panel_leave(row, row.leaveEvent)
 
@@ -3034,7 +3431,16 @@ class DropdownPopup(QObject):
     def _make_panel_enter(self, row, item, panel_files, original_enter):
         def enter(e):
             original_enter(e)
-            self._open_side_panel(row, item, panel_files)
+            files = panel_files
+            if files is None:
+                # Folder row — list it now (see _populate_list). _dir_entries
+                # caches the result, so re-hovering the same row is free.
+                try:
+                    files = self._folder_panel_files(item["content"][0],
+                                                     item.get("hidden_files"))
+                except Exception:
+                    files = item.get("content") or []
+            self._open_side_panel(row, item, files)
         return enter
 
     def _make_panel_leave(self, row, original_leave):
@@ -3049,12 +3455,20 @@ class DropdownPopup(QObject):
         """On-disk children of a folder (dirs first, then case-insensitive),
         minus any paths the user hid via "Remove from list". Kept in one place
         so the top-level single-folder side list and the nested folder panel
-        filter hides identically."""
-        kids = sorted(
-            [os.path.join(folder, n) for n in os.listdir(folder)],
-            key=lambda p: (not os.path.isdir(p), os.path.basename(p).lower()))
-        hidden = hidden or []
-        return [f for f in kids if f not in hidden] if hidden else kids
+        filter hides identically.
+
+        Reads through the mtime-validated _dir_entries cache. The old version
+        did an os.listdir PLUS an os.path.isdir per child — 253 ms on a large
+        folder, paid on the UI thread for every folder row of every rebuild.
+        The `hidden` filter is a set lookup now too; as a list it was O(n·m).
+        """
+        kids  = sorted(_dir_entries(folder),
+                       key=lambda e: (not e[1], os.path.basename(e[0]).lower()))
+        paths = [p for p, _ in kids]
+        if hidden:
+            hs = set(hidden)
+            return [f for f in paths if f not in hs]
+        return paths
 
     def _release_panel_row(self):
         """Drop the highlight held by the row that owned the last side panel.
@@ -3220,6 +3634,33 @@ class DropdownPopup(QObject):
             popup.move(px, py)
 
     # ── Search ────────────────────────────────────────────────────────────────
+
+    def _on_search_typed(self, query: str):
+        """Debounce the search box.
+
+        textChanged fires per KEYSTROKE, and each one rebuilt the entire row
+        list. Typing "invoice" meant seven full rebuilds — the box visibly
+        fought the typing. One rebuild shortly after the last keypress reads as
+        instant and costs a seventh as much. The filter itself is untouched:
+        this only decides WHEN _on_search runs. (_refresh still calls
+        _on_search directly — that path is not a keystroke.)
+        """
+        if self._search_timer is None:
+            self._search_timer = QTimer(self)
+            self._search_timer.setSingleShot(True)
+            self._search_timer.timeout.connect(self._run_pending_search)
+        self._search_timer.start(110)
+
+    def _run_pending_search(self):
+        # Read the box directly rather than a captured string, so a rebuild
+        # between keypress and timeout can never filter by a stale query.
+        edit = getattr(self, "_search_edit", None)
+        if not self._popup or edit is None:
+            return
+        try:
+            self._on_search(edit.text())
+        except RuntimeError:
+            pass          # the window went away while the timer was pending
 
     def _on_search(self, query: str):
         q = query.strip().lower()
@@ -3431,7 +3872,8 @@ class DropdownPopup(QObject):
             return
         pid = self.profiles.create_profile(name.strip())
         for it in reversed(targets):
-            self.profiles.add_item_to_profile(it, pid)
+            self.profiles.add_item_to_profile(it, pid, save=False)
+        self.profiles._save()           # one write for the batch
         self._selected_ids.clear()      # done — drop the highlight
         self._show_toast(f'Created "{name.strip()}" · added {len(targets)} clips')
         self._refresh()
@@ -3450,7 +3892,7 @@ class DropdownPopup(QObject):
         self._show_toast(f'Created "{name.strip()}"')
         self._refresh()
 
-    def _send_one_to_profile(self, item: dict, profile_id: str):
+    def _send_one_to_profile(self, item: dict, profile_id: str, save: bool = True):
         """Send ONE clip to a profile WITHOUT toast/refresh (batch-friendly).
         Named profiles get an INDEPENDENT COPY (export model) — deleting or
         trimming it there never affects General or any other profile. Sending
@@ -3458,9 +3900,17 @@ class DropdownPopup(QObject):
         already there) — a profile copy can outlive the General original it
         was made from, so an un-hide alone would silently do nothing."""
         if profile_id == "general":
-            self.history.add_existing(item)
+            self.history.add_existing(item, save=save)
         else:
-            self.profiles.add_item_to_profile(item, profile_id)
+            self.profiles.add_item_to_profile(item, profile_id, save=save)
+
+    def _flush_profile_store(self, profile_id: str):
+        """Persist the store a deferred _send_one_to_profile batch wrote into."""
+        if profile_id == "general":
+            if self.history:
+                self.history._save_history()
+        elif self.profiles:
+            self.profiles._save()
 
     def _send_item_to_profile(self, item: dict, profile_id: str, profile_name: str):
         self._send_one_to_profile(item, profile_id)
@@ -3476,7 +3926,8 @@ class DropdownPopup(QObject):
         if not targets:
             return
         for it in reversed(targets):
-            self._send_one_to_profile(it, profile_id)
+            self._send_one_to_profile(it, profile_id, save=False)
+        self._flush_profile_store(profile_id)   # one write for the batch
         self._selected_ids.clear()      # done — drop the highlight
         self._show_toast(f'Sent {len(targets)} items to "{profile_name}"')
         self._refresh()
@@ -3494,20 +3945,35 @@ class DropdownPopup(QObject):
             self.history.toggle_pin(item["id"])
         self._refresh()
 
-    def _delete_one(self, item: dict):
+    def _delete_one(self, item: dict, save: bool = True):
         """Remove a single item from the ACTIVE list only — WITHOUT refreshing,
         so a multi-delete can drop every selected row and repaint just once.
 
         In the export model each list owns its own copies, so removing here
-        never affects the same item held by another profile or by General."""
+        never affects the same item held by another profile or by General.
+
+        save=False also defers the DISK write, so a multi-delete encrypts and
+        fsyncs the store once instead of once per row."""
         if self.profiles:
             active = self.profiles.get_active_profile()
             if active["id"] == "general":
-                self.history.delete_item(item["id"])
+                self.history.delete_item(item["id"], save=save)
             else:
-                self.profiles.remove_item_from_profile(item["id"], active["id"])
+                self.profiles.remove_item_from_profile(item["id"], active["id"],
+                                                       save=save)
         else:
-            self.history.delete_item(item["id"])
+            self.history.delete_item(item["id"], save=save)
+
+    def _flush_active_store(self):
+        """Persist whichever store _delete_one / _send_one_to_profile were
+        told to skip saving. Called once after a batch."""
+        active_general = True
+        if self.profiles:
+            active_general = self.profiles.get_active_profile()["id"] == "general"
+            if not active_general:
+                self.profiles._save()
+        if active_general and self.history:
+            self.history._save_history()
 
     def _delete_item(self, item: dict):
         """Delete one row — the ✕ button and the single-row right-click menu."""
@@ -3515,12 +3981,14 @@ class DropdownPopup(QObject):
         self._refresh()
 
     def _delete_selected(self):
-        """Delete every Ctrl+click-selected row in one pass, then refresh."""
+        """Delete every Ctrl+click-selected row in one pass, then refresh.
+        One disk write for the whole batch, not one per row."""
         ids = set(self._selected_ids)
         if not ids:
             return
         for it in [i for i in self._items_all if i["id"] in ids]:
-            self._delete_one(it)
+            self._delete_one(it, save=False)
+        self._flush_active_store()
         self._selected_ids.clear()
         self._refresh()
 
@@ -3872,6 +4340,8 @@ class DropdownPopup(QObject):
         self._close_windows()
         if self._hover_timer:
             self._hover_timer.stop()
+        if self._search_timer:
+            self._search_timer.stop()   # no rebuild after the window is gone
         self._selected_ids.clear()   # selection is per popup session
         # Popup session over — forget the paste target so the next show()
         # captures the then-foreground window, not a stale one. (_refresh

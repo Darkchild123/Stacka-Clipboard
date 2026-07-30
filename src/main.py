@@ -13,6 +13,15 @@ import os
 import threading
 import sys
 
+# NOTE on GIL vs the mouse hook — do not "fix" this with sys.setswitchinterval.
+# Windows delivers no mouse event to ANY app until the WH_MOUSE_LL hook in
+# context_menu.py returns, and that callback is Python, so it needs the GIL.
+# Lowering the switch interval to 1 ms looks like it should help, and was tried:
+# measured against a realistic rebuild it changed nothing (max hook stall 5.6 ms
+# vs 7.1 ms — noise), because PyQt already releases the GIL around every Qt
+# call, which keeps the hook thread fed. What actually matters is doing less
+# work on the main thread; see the UI notes in CLAUDE.md.
+
 # ── Claim Per-Monitor-v2 DPI awareness FIRST ────────────────────────────────
 # This MUST run before anything imports pyautogui: pyautogui calls the old
 # SetProcessDPIAware() at import time, forcing System-DPI mode, which then

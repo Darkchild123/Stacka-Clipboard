@@ -65,6 +65,10 @@ class ClipboardWatcher:
         # so we don't accidentally record our own paste as a new copy
         self.paused = False
 
+        # The image _get_image_hash just pulled off the clipboard, kept so
+        # check_clipboard can reuse it instead of grabbing a second time.
+        self._grabbed_image = None
+
 
     def start(self):
         """
@@ -164,9 +168,13 @@ class ClipboardWatcher:
         # Find out where it was copied from
         source = self.get_source()
 
-        # If it's an image, grab it properly using PIL
+        # If it's an image, reuse the one _get_image_hash already grabbed
+        # rather than pulling the bitmap off the clipboard a second time.
         if content_type == "image":
-            content = ImageGrab.grabclipboard()
+            content = self._grabbed_image
+            self._grabbed_image = None      # don't pin a large image in memory
+            if content is None:
+                content = ImageGrab.grabclipboard()
             if content is None:
                 return
 
@@ -540,10 +548,23 @@ class ClipboardWatcher:
     def _get_image_hash(self):
         """
         Creates a unique fingerprint for an image in the clipboard.
+
+        The grabbed image is stashed on self so check_clipboard can reuse it.
+        Copying a screenshot used to pull the bitmap off the clipboard TWICE —
+        once here for the hash, then again to store it — and each grab plus
+        PNG encode is heavy PIL work on this background thread. That thread
+        holds the GIL while it runs, which stalls the mouse hook and shows up
+        as a cursor hitch right after copying a large image.
+
+        The hash stays a PNG-bytes MD5 on purpose: it is the item id, so
+        changing how it is derived would stop a re-copied image from matching
+        the entry already in the list.
         """
+        self._grabbed_image = None
         try:
             img = ImageGrab.grabclipboard()
             if img:
+                self._grabbed_image = img
                 import io
                 buffer = io.BytesIO()
                 img.save(buffer, format="PNG")

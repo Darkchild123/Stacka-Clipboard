@@ -87,7 +87,7 @@ class HistoryManager:
         self._save_history()
 
 
-    def add_existing(self, item):
+    def add_existing(self, item, save=True):
         """
         Insert an ALREADY-FORMED item as a new General entry — used when a clip
         is sent to General from a named profile.
@@ -108,7 +108,8 @@ class HistoryManager:
         if existing is not None:
             if existing.get("hidden"):
                 existing["hidden"] = False
-                self._save_history()
+                if save:
+                    self._save_history()
             return
 
         it = _copy.deepcopy(item)
@@ -127,7 +128,8 @@ class HistoryManager:
 
         self.items.insert(0, it)
         self._enforce_limit()
-        self._save_history()
+        if save:
+            self._save_history()
 
 
     # ============================================================
@@ -267,10 +269,13 @@ class HistoryManager:
     # DELETE
     # ============================================================
 
-    def delete_item(self, item_id):
+    def delete_item(self, item_id, save=True):
         """
         Removes an item from history permanently.
         If it was an image, also deletes the saved image file.
+
+        save=False defers the write — see the note on _save_history about
+        batching. The caller MUST call _save_history() itself afterwards.
         """
         item = self._find_by_id(item_id)
         if item:
@@ -279,13 +284,17 @@ class HistoryManager:
                 os.remove(item["content"])
 
             self.items.remove(item)
-            self._save_history()
+            if save:
+                self._save_history()
 
-    def remove_file_from_item(self, item_id, filepath):
+    def remove_file_from_item(self, item_id, filepath, save=True):
         """
         Removes one file path from a multi-file clipboard entry's content list.
         If the entry becomes empty afterwards the whole entry is deleted.
         Returns True if the entry still exists, False if it was fully removed.
+
+        save=False defers the write so removing N files from a clip persists
+        ONCE rather than N times. The caller MUST call _save_history() after.
         """
         item = self._find_by_id(item_id)
         if item is None:
@@ -294,9 +303,11 @@ class HistoryManager:
             item["content"].remove(filepath)
             if not item["content"]:
                 self.items.remove(item)
-                self._save_history()
+                if save:
+                    self._save_history()
                 return False
-        self._save_history()
+        if save:
+            self._save_history()
         return True
 
 
@@ -457,6 +468,13 @@ class HistoryManager:
     def _save_history(self):
         """
         Saves the current history list to history.json, ENCRYPTED AT REST.
+
+        Costs ~4 ms (JSON dump + DPAPI encrypt + fsync + .bak copy) and runs
+        on the UI thread, so it is deliberately NOT called per item inside a
+        loop. Methods that mutate one entry take a `save=False` flag for that
+        reason; batch callers flush once at the end. Still fully synchronous —
+        a write that has returned is on disk, which is what makes the atomic
+        .tmp → .bak → replace strategy below worth having.
 
         secure_store.write_json keeps the original atomic strategy (.tmp →
         fsync → .bak → os.replace) and DPAPI-encrypts the JSON, so the stored
