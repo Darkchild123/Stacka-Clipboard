@@ -44,8 +44,10 @@ Everything lives in a single folder on your computer — `%APPDATA%\Stacka`
   encrypted before it is written to disk, and it is decrypted only in memory
   at the moment you paste it.
 - **A diagnostic log** (`stacka.log`) records app events such as startup and
-  errors. It deliberately contains **no clipboard content and no clip
-  details** — not the text you copied, not window titles, not file paths.
+  errors, plus a note that a clip of a given type was captured and the source
+  label it came from (the same *"report.docx (Word)"* text shown in the list).
+  It never contains **the clipboard content itself** — none of the text, files
+  or images you copy, and no card numbers.
 
 Because this data is protected by your Windows account rather than a separate
 password, it does **not** protect against someone using your computer while you
@@ -60,7 +62,8 @@ to go.
 
 The only time anything leaves Stacka is when **you click a link yourself**:
 
-- **"Support Stacka"** opens a donation page (Paystack) in your normal browser.
+- **"Support Stacka"** — present only in the free GitHub edition, not the
+  Microsoft Store edition — opens a donation page in your normal browser.
 - **"Open link"** on a copied URL opens it in your normal browser.
 - The **GitHub links** in Settings open in your normal browser.
 
